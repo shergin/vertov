@@ -19,3 +19,7 @@ lexopt = "0.3"
 # Only for the live-mode SIGINT handler that restores the cursor on Ctrl-C.
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+
+# Golden tests generate deterministic logdirs with the tfevents test writer.
+[dev-dependencies]
+tfevents = { path = "../tfevents" }
