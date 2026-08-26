@@ -1,0 +1,11 @@
+[package]
+name = "vertov-model"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Unified data model for vertov: catalog, exact summaries, restart segments, reload loop"
+
+[dependencies]
+tfevents = { path = "../tfevents", version = "0.1" }
