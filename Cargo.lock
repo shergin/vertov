@@ -567,7 +567,7 @@ dependencies = [
  "lexopt",
  "libc",
  "malevich",
- "tfevents",
+ "vertov-model",
 ]
 
 [[package]]

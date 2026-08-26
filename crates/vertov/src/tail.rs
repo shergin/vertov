@@ -13,22 +13,22 @@ use std::time::Instant;
 
 use malevich::Frame;
 use malevich::stream::Live;
+use vertov_model::Project;
 
 use crate::chart::ChartData;
-use crate::logdir::Watcher;
 use crate::{Args, sized, title};
 
 static INTERRUPTED: AtomicBool = AtomicBool::new(false);
 
 pub fn run(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
     install_interrupt_handler();
-    let mut watcher = Watcher::new(&args.logdir, &args.tag);
+    let mut project = Project::new(&args.logdir);
 
     // Hide the cursor while repainting; restored below on every exit path.
     let mut cursor = io::stderr();
     let _ = write!(cursor, "\x1b[?25l");
     let _ = cursor.flush();
-    let result = repaint(args, &mut watcher);
+    let result = repaint(args, &mut project);
     let _ = write!(cursor, "\x1b[?25h");
     let _ = cursor.flush();
 
@@ -39,7 +39,7 @@ pub fn run(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
     }
 }
 
-fn repaint(args: &Args, watcher: &mut Watcher) -> io::Result<()> {
+fn repaint(args: &Args, project: &mut Project) -> io::Result<()> {
     let mut live = Live::new(io::stderr());
     let mut last_change = Instant::now();
     let mut drawn_once = false;
@@ -47,16 +47,20 @@ fn repaint(args: &Args, watcher: &mut Watcher) -> io::Result<()> {
         if INTERRUPTED.load(Ordering::SeqCst) {
             return Ok(());
         }
-        let appended = watcher.poll()?;
-        if appended > 0 {
+        let report = project.refresh()?;
+        let changed = report.new_points > 0 || report.new_files > 0;
+        if changed {
             last_change = Instant::now();
         }
-        if appended > 0 || !drawn_once {
-            let data = ChartData::collect(watcher);
+        if changed || !drawn_once {
+            let data = ChartData::collect(project, &args.tag)?;
             // Re-detect every draw so a terminal resize follows along.
             let frame = sized(Frame::detect_for(&io::stderr()), args);
-            let status = status_line(watcher, args, last_change);
-            live.draw(&data.plot(&title(args, &data, watcher, Some(&status))), &frame)?;
+            let status = status_line(project, args, last_change);
+            live.draw(
+                &data.plot(&title(args, &data, project, Some(&status))),
+                &frame,
+            )?;
             drawn_once = true;
         }
         // Sleep in short slices so Ctrl-C answers promptly.
@@ -72,9 +76,9 @@ fn repaint(args: &Args, watcher: &mut Watcher) -> io::Result<()> {
 
 /// `live` while data flows; `stale Ns` once nothing has arrived for two poll
 /// intervals — the viewer must say when it is showing old data.
-fn status_line(watcher: &Watcher, args: &Args, last_change: Instant) -> String {
+fn status_line(project: &Project, args: &Args, last_change: Instant) -> String {
     let quiet = last_change.elapsed();
-    if watcher.runs.is_empty() {
+    if project.runs.is_empty() {
         "waiting for data".to_owned()
     } else if quiet > 2 * args.interval {
         format!("stale {}s", quiet.as_secs())

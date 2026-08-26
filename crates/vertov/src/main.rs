@@ -5,16 +5,15 @@
 //! trainer already writes; vertov only ever reads.
 
 mod chart;
-mod logdir;
 mod tail;
 
 use std::process::ExitCode;
 use std::time::Duration;
 
 use malevich::Frame;
+use vertov_model::{Project, SeriesClass};
 
 use chart::ChartData;
-use logdir::Watcher;
 
 const HELP: &str = "\
 vertov — a terminal viewer for ML training runs
@@ -151,7 +150,7 @@ fn sized(mut frame: Frame, args: &Args) -> Frame {
 
 /// A one-line summary of what the chart shows and what it had to drop —
 /// staleness and loss are displayed, never hidden.
-fn title(args: &Args, data: &ChartData, watcher: &Watcher, live: Option<&str>) -> String {
+fn title(args: &Args, data: &ChartData, project: &Project, live: Option<&str>) -> String {
     use std::fmt::Write as _;
     let mut title = args.tag.clone();
     if data.run_count > 1 {
@@ -160,11 +159,11 @@ fn title(args: &Args, data: &ChartData, watcher: &Watcher, live: Option<&str>) -
     if data.cut > 0 {
         let _ = write!(title, " · +{} series not shown", data.cut);
     }
-    if watcher.dropped_records > 0 {
-        let _ = write!(title, " · {} records lost", watcher.dropped_records);
+    if project.dropped_records > 0 {
+        let _ = write!(title, " · {} records lost", project.dropped_records);
     }
-    if watcher.dead_files > 0 {
-        let _ = write!(title, " · {} dead files", watcher.dead_files);
+    if project.dead_files > 0 {
+        let _ = write!(title, " · {} dead files", project.dead_files);
     }
     if let Some(live) = live {
         let _ = write!(title, " · {live}");
@@ -173,27 +172,40 @@ fn title(args: &Args, data: &ChartData, watcher: &Watcher, live: Option<&str>) -
 }
 
 fn show(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
-    let mut watcher = Watcher::new(&args.logdir, &args.tag);
-    watcher.poll()?;
-    let data = ChartData::collect(&watcher);
+    let mut project = Project::new(&args.logdir);
+    project.refresh()?;
+    let data = ChartData::collect(&mut project, &args.tag)?;
     if data.is_empty() {
-        return Err(no_match_message(args, &watcher).into());
+        return Err(no_match_message(args, &project).into());
     }
     let frame = sized(Frame::detect(), args);
-    print!("{}", data.plot(&title(args, &data, &watcher, None)).render(&frame));
+    print!(
+        "{}",
+        data.plot(&title(args, &data, &project, None)).render(&frame)
+    );
     Ok(())
 }
 
-fn no_match_message(args: &Args, watcher: &Watcher) -> String {
+fn no_match_message(args: &Args, project: &Project) -> String {
     use std::fmt::Write as _;
+    let seen: std::collections::BTreeSet<&String> = project
+        .runs
+        .values()
+        .flat_map(|run| {
+            run.series
+                .iter()
+                .filter(|(_, series)| series.class == SeriesClass::Scalar)
+                .map(|(tag, _)| tag)
+        })
+        .collect();
     let mut message = format!("no scalar tag matching `{}` in {}", args.tag, args.logdir);
-    if !watcher.seen_tags.is_empty() {
+    if !seen.is_empty() {
         let _ = write!(message, "\nscalar tags found:");
-        for tag in watcher.seen_tags.iter().take(20) {
+        for tag in seen.iter().take(20) {
             let _ = write!(message, "\n  {tag}");
         }
-        if watcher.seen_tags.len() > 20 {
-            let _ = write!(message, "\n  … and {} more", watcher.seen_tags.len() - 20);
+        if seen.len() > 20 {
+            let _ = write!(message, "\n  … and {} more", seen.len() - 20);
         }
     }
     message
