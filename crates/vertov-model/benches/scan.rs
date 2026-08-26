@@ -65,8 +65,32 @@ fn scan(criterion: &mut Criterion) {
         });
     });
 
+    // Warm start: load the summary cache, then one refresh that verifies
+    // file identities and reads nothing.
+    group.bench_function("warm_1000_runs", |bencher| {
+        // Beside the logdir, never inside it: even a bench observes only.
+        let cache_dir =
+            std::env::temp_dir().join(format!("vertov-scan-bench-cache-{}", std::process::id()));
+        let mut cold = Project::new(&root);
+        cold.set_cache_dir(&cache_dir);
+        cold.refresh().unwrap();
+        cold.save_cache().unwrap();
+        drop(cold);
+        bencher.iter(|| {
+            let mut project = Project::new(&root);
+            project.set_cache_dir(&cache_dir);
+            assert!(project.load_cache());
+            let report = project.refresh().unwrap();
+            assert_eq!(report.new_points, 0);
+            black_box(project.runs.len())
+        });
+    });
+
     group.finish();
     let _ = fs::remove_dir_all(&root);
+    let _ = fs::remove_dir_all(
+        std::env::temp_dir().join(format!("vertov-scan-bench-cache-{}", std::process::id())),
+    );
 }
 
 criterion_group!(benches, scan);

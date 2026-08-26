@@ -50,6 +50,17 @@ impl Moments {
     pub fn variance(&self) -> Option<f64> {
         (self.count > 0).then_some((self.m2 / self.count as f64).max(0.0))
     }
+
+    /// The internal `(count, mean, m2)` triple, for serialization (the
+    /// summary cache). `m2` is the sum of squared deviations from the mean.
+    pub fn raw(&self) -> (u64, f64, f64) {
+        (self.count, self.mean, self.m2)
+    }
+
+    /// Reconstructs an accumulator from a [`raw`](Self::raw) triple.
+    pub fn from_raw(count: u64, mean: f64, m2: f64) -> Moments {
+        Moments { count, mean, m2 }
+    }
 }
 
 #[cfg(test)]

@@ -33,6 +33,9 @@ Options:
                         no inotify required).
       --width <N>       Frame width in cells (default: detected).
       --height <N>      Frame height in cells (default: detected).
+      --no-cache        Skip the summary cache (~/.cache/vertov/); always
+                        re-read from the logdir. The cache is disposable —
+                        deleting it by hand is always safe too.
   -h, --help            This help.
 
 Examples:
@@ -47,6 +50,7 @@ struct Args {
     interval: Duration,
     width: Option<usize>,
     height: Option<usize>,
+    no_cache: bool,
 }
 
 enum Command {
@@ -89,6 +93,7 @@ fn parse_args() -> Result<Option<Args>, lexopt::Error> {
     let mut interval = Duration::from_secs(5);
     let mut width = None;
     let mut height = None;
+    let mut no_cache = false;
 
     let mut parser = lexopt::Parser::from_env();
     while let Some(arg) = parser.next()? {
@@ -118,6 +123,7 @@ fn parse_args() -> Result<Option<Args>, lexopt::Error> {
             }
             Long("width") => width = Some(parser.value()?.parse()?),
             Long("height") => height = Some(parser.value()?.parse()?),
+            Long("no-cache") => no_cache = true,
             Short('h') | Long("help") => return Ok(None),
             _ => return Err(arg.unexpected()),
         }
@@ -135,6 +141,7 @@ fn parse_args() -> Result<Option<Args>, lexopt::Error> {
         interval,
         width,
         height,
+        no_cache,
     }))
 }
 
@@ -173,7 +180,14 @@ fn title(args: &Args, data: &ChartData, project: &Project, live: Option<&str>) -
 
 fn show(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
     let mut project = Project::new(&args.logdir);
+    if !args.no_cache {
+        project.load_cache();
+    }
     project.refresh()?;
+    if !args.no_cache {
+        // Best-effort: the cache is an accelerator, never a requirement.
+        let _ = project.save_cache();
+    }
     let data = ChartData::collect(&mut project, &args.tag)?;
     if data.is_empty() {
         return Err(no_match_message(args, &project).into());

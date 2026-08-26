@@ -29,8 +29,9 @@ so numbers include real file I/O through the page cache.
 |---|---|---|
 | `cold_1000_runs` | discover + ingest everything into summaries | 602 ms |
 | `quiet_tick_1000_runs` | one refresh with nothing changed (walk + drain + stat) | 24 ms |
+| `warm_1000_runs` | load summary cache + one verifying refresh, nothing re-read | 48 ms |
 
 Recorded 2026-08-26, same hardware as above.
 
 Budgets: a 1000-run cold scan under 1 s; a quiet poll tick under 100 ms —
-comfortably inside a 5 s poll interval.
+comfortably inside a 5 s poll interval; a cache-hit warm start under 100 ms.

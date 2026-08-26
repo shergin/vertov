@@ -13,6 +13,7 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+mod cache;
 pub mod moments;
 pub mod project;
 pub mod series;

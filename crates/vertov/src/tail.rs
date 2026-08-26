@@ -23,6 +23,9 @@ static INTERRUPTED: AtomicBool = AtomicBool::new(false);
 pub fn run(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
     install_interrupt_handler();
     let mut project = Project::new(&args.logdir);
+    if !args.no_cache {
+        project.load_cache();
+    }
 
     // Hide the cursor while repainting; restored below on every exit path.
     let mut cursor = io::stderr();
@@ -31,6 +34,11 @@ pub fn run(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
     let result = repaint(args, &mut project);
     let _ = write!(cursor, "\x1b[?25h");
     let _ = cursor.flush();
+    if !args.no_cache {
+        // Best-effort on the way out: the cache is an accelerator, never a
+        // requirement.
+        let _ = project.save_cache();
+    }
 
     match result {
         // A closed terminal is a clean stop, not a failure.

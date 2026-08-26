@@ -124,6 +124,11 @@ pub struct Project {
     /// borrowed keys.
     materialized: BTreeMap<String, BTreeMap<String, MaterializedSeries>>,
     clock: u64,
+    /// Resume state loaded from the summary cache, consumed as files open.
+    cached: BTreeMap<PathBuf, crate::cache::CachedFile>,
+    /// Override for the cache directory (tests, `--no-cache` alternatives);
+    /// `None` uses `$XDG_CACHE_HOME/vertov` or `~/.cache/vertov`.
+    cache_dir: Option<PathBuf>,
 }
 
 impl Project {
@@ -138,6 +143,8 @@ impl Project {
             files: BTreeMap::new(),
             materialized: BTreeMap::new(),
             clock: 0,
+            cached: BTreeMap::new(),
+            cache_dir: None,
         }
     }
 
@@ -146,13 +153,92 @@ impl Project {
         &self.root
     }
 
+    /// Uses `dir` for the summary cache instead of the default
+    /// (`$XDG_CACHE_HOME/vertov` or `~/.cache/vertov`).
+    pub fn set_cache_dir(&mut self, dir: impl Into<PathBuf>) {
+        self.cache_dir = Some(dir.into());
+    }
+
+    /// Loads the summary cache for this root, if present and well-formed.
+    /// Call before the first [`refresh`](Self::refresh): summaries install
+    /// immediately, and files unchanged since the save are not re-read —
+    /// grown files resume from their cached offsets. Returns whether a
+    /// cache was loaded. The cache is disposable; a missing or torn one
+    /// just means a cold start.
+    pub fn load_cache(&mut self) -> bool {
+        if !self.files.is_empty() {
+            return false;
+        }
+        match crate::cache::load(&self.root, self.cache_dir.as_deref()) {
+            Some(cached) => {
+                self.runs = cached.runs;
+                self.cached = cached.files;
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Saves the summary cache: per live file, its identity
+    /// `(path, size, mtime)` and committed offset, plus every run's
+    /// summaries. Runs with dead files are left uncached so their damage is
+    /// re-detected (and re-reported) next session.
+    pub fn save_cache(&self) -> io::Result<()> {
+        let dead_runs: std::collections::BTreeSet<&String> = self
+            .files
+            .values()
+            .filter(|state| state.dead)
+            .map(|state| &state.run)
+            .collect();
+        let files: Vec<(PathBuf, String, u64)> = self
+            .files
+            .iter()
+            .filter(|(_, state)| !dead_runs.contains(&state.run))
+            .map(|(path, state)| {
+                (
+                    path.clone(),
+                    state.run.clone(),
+                    state.reader.committed_offset(),
+                )
+            })
+            .collect();
+        crate::cache::save(&self.root, self.cache_dir.as_deref(), &self.runs, &files)
+    }
+
     /// One reload pass: discover new runs and files, drain every live
     /// reader into summaries (and any materialized series), refresh file
     /// modification times, and drop runs whose files vanished.
     pub fn refresh(&mut self) -> io::Result<RefreshReport> {
         let mut report = RefreshReport::default();
+        let discovered = discover(&self.root)?;
 
-        for (run_name, path) in discover(&self.root)? {
+        // Cache validation pre-pass: a cached file that vanished, shrank,
+        // or changed without growing invalidates its whole run — the run's
+        // summaries came from bytes we can no longer trust, so drop them
+        // and let this pass rebuild from disk. A grown file is the normal
+        // live case (tfevents is append-only) and resumes from its offset.
+        if !self.cached.is_empty() {
+            let present: std::collections::BTreeSet<&PathBuf> =
+                discovered.iter().map(|(_, path)| path).collect();
+            let mut tainted = std::collections::BTreeSet::new();
+            for (path, cached) in &self.cached {
+                let intact = present.contains(path)
+                    && std::fs::metadata(path).is_ok_and(|metadata| {
+                        metadata.len() > cached.size
+                            || (metadata.len() == cached.size
+                                && metadata.modified().ok() == Some(cached.mtime))
+                    });
+                if !intact {
+                    tainted.insert(cached.run.clone());
+                }
+            }
+            for run in tainted {
+                self.runs.remove(&run);
+                self.cached.retain(|_, cached| cached.run != run);
+            }
+        }
+
+        for (run_name, path) in discovered {
             if self.files.contains_key(&path) {
                 continue;
             }
@@ -162,6 +248,10 @@ impl Project {
                 Err(err) if err.kind() == ErrorKind::NotFound => continue,
                 Err(err) => return Err(err),
             };
+            let reader = match self.cached.remove(&path) {
+                Some(cached) => EventFileReader::resume(file, cached.offset)?,
+                None => EventFileReader::new(file),
+            };
             let dir = path.parent().unwrap_or(&self.root).to_path_buf();
             self.runs
                 .entry(run_name.clone())
@@ -170,7 +260,7 @@ impl Project {
                 path,
                 FileState {
                     run: run_name,
-                    reader: EventFileReader::new(file),
+                    reader,
                     dead: false,
                 },
             );
