@@ -12,6 +12,8 @@
 
 pub mod crc;
 pub mod record;
+mod wire;
 
 pub use crc::MaskedCrc;
 pub use record::{ChecksumError, ReadRecordError, Record, RecordReader};
+pub use wire::DecodeError;
