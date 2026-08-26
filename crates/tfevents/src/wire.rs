@@ -165,24 +165,20 @@ impl<'a> MessageReader<'a> {
 /// Decodes a packed repeated `double` field (also accepting the single
 /// unpacked element handed in by the caller via [`WireValue::Fixed64`]).
 pub(crate) fn packed_f64(bytes: &[u8]) -> Result<Vec<f64>, DecodeError> {
-    if bytes.len() % 8 != 0 {
+    let (chunks, rest) = bytes.as_chunks::<8>();
+    if !rest.is_empty() {
         return Err(DecodeError::MisalignedPackedField);
     }
-    Ok(bytes
-        .chunks_exact(8)
-        .map(|chunk| f64::from_le_bytes(chunk.try_into().expect("8 bytes")))
-        .collect())
+    Ok(chunks.iter().map(|chunk| f64::from_le_bytes(*chunk)).collect())
 }
 
 /// Decodes a packed repeated `float` field.
 pub(crate) fn packed_f32(bytes: &[u8]) -> Result<Vec<f32>, DecodeError> {
-    if bytes.len() % 4 != 0 {
+    let (chunks, rest) = bytes.as_chunks::<4>();
+    if !rest.is_empty() {
         return Err(DecodeError::MisalignedPackedField);
     }
-    Ok(bytes
-        .chunks_exact(4)
-        .map(|chunk| f32::from_le_bytes(chunk.try_into().expect("4 bytes")))
-        .collect())
+    Ok(chunks.iter().map(|chunk| f32::from_le_bytes(*chunk)).collect())
 }
 
 #[cfg(test)]

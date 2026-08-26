@@ -11,9 +11,14 @@
 #![warn(missing_docs)]
 
 pub mod crc;
+pub mod event;
 pub mod record;
 mod wire;
 
 pub use crc::MaskedCrc;
+pub use event::{
+    DataClass, DataType, Event, EventPayload, Histogram, Image, SummaryMetadata, SummaryPayload,
+    SummaryValue, Tensor,
+};
 pub use record::{ChecksumError, ReadRecordError, Record, RecordReader};
 pub use wire::DecodeError;
