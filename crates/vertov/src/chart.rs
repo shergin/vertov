@@ -4,7 +4,7 @@
 use std::collections::BTreeSet;
 use std::io;
 
-use malevich::{Color, Line, Plot, Rule, stat};
+use malevich::{Color, Line, Plot, Rule, Scale, stat};
 
 use vertov_model::{Project, SeriesClass};
 
@@ -22,7 +22,7 @@ pub enum XAxis {
     Relative,
 }
 
-/// Chart-shaping options shared by `show` and `tail`.
+/// Chart-shaping options shared by `show`, `tail`, and the TUI.
 pub struct ChartOptions {
     pub x_axis: XAxis,
     /// EWMA factor in `[0, 1)`: smoothed line over the faded raw one —
@@ -30,6 +30,8 @@ pub struct ChartOptions {
     pub smooth: Option<f64>,
     /// Only runs whose name contains this.
     pub runs_filter: Option<String>,
+    /// Log-10 y axis (values at or below zero become gaps, honestly).
+    pub log_y: bool,
 }
 
 /// One drawn series: label, x column, raw values, and the optional
@@ -47,6 +49,10 @@ pub struct ChartData {
     series: Vec<ChartSeries>,
     /// X positions where a restart segment begins, across the drawn series.
     boundaries: Vec<f64>,
+    /// Wall-clock x axis (rendered on malevich's calendar time scale).
+    time_x: bool,
+    /// Log-10 y axis.
+    log_y: bool,
     /// Series beyond [`MAX_SERIES`], dropped from the chart and counted in
     /// the title rather than silently.
     pub cut: usize,
@@ -87,41 +93,60 @@ impl ChartData {
             let Some(points) = project.materialize(run, tag)? else {
                 continue;
             };
-            if points.is_empty() {
-                continue;
-            }
-            let xs: Vec<f64> = match options.x_axis {
-                XAxis::Step => points.steps.iter().map(|&step| step as f64).collect(),
-                XAxis::Wall => points.walls.clone(),
-                XAxis::Relative => {
-                    let first = points.walls[0];
-                    points.walls.iter().map(|wall| wall - first).collect()
-                }
-            };
-            for &boundary in &points.boundaries {
-                boundaries.insert(xs[boundary].to_bits());
-            }
-            let smoothed = options
-                .smooth
-                .map(|alpha| stat::ewma(&points.values, alpha));
             let label = if multi_run {
                 format!("{run} {tag}")
             } else {
                 tag.clone()
             };
-            series.push(ChartSeries {
-                label,
-                xs,
-                values: points.values.clone(),
-                smoothed,
-            });
+            push_series(points, label, options, &mut series, &mut boundaries);
         }
-        Ok(ChartData {
+        Ok(ChartData::assemble(series, boundaries, options, cut, run_count))
+    }
+
+    /// One exact tag across the given runs (the TUI's shape). Reads only
+    /// already-materialized points ([`Project::points`]); runs not yet
+    /// materialized simply do not draw until they are.
+    pub fn for_tag(
+        project: &Project,
+        runs: &[String],
+        tag: &str,
+        options: &ChartOptions,
+    ) -> ChartData {
+        let cut = runs.len().saturating_sub(MAX_SERIES);
+        let shown = &runs[..runs.len().min(MAX_SERIES)];
+        let multi_run = shown.len() > 1;
+        let mut series = Vec::new();
+        let mut boundaries = BTreeSet::new();
+        let mut run_count = 0;
+        for run in shown {
+            let Some(points) = project.points(run, tag) else {
+                continue;
+            };
+            if points.is_empty() {
+                continue;
+            }
+            run_count += 1;
+            let label = if multi_run { run.clone() } else { tag.to_owned() };
+            push_series(points, label, options, &mut series, &mut boundaries);
+        }
+        ChartData::assemble(series, boundaries, options, cut, run_count)
+    }
+
+    fn assemble(
+        series: Vec<ChartSeries>,
+        boundaries: BTreeSet<u64>,
+        options: &ChartOptions,
+        cut: usize,
+        run_count: usize,
+    ) -> ChartData {
+        ChartData {
             series,
             boundaries: boundaries.into_iter().map(f64::from_bits).collect(),
+            time_x: options.x_axis == XAxis::Wall,
+            log_y: options.log_y,
             cut,
             run_count,
-        })
+        }
     }
 
     pub fn is_empty(&self) -> bool {
@@ -150,6 +175,44 @@ impl ChartData {
                 rule
             });
         }
+        if self.time_x {
+            plot = plot.x_scale(Scale::Time);
+        }
+        if self.log_y {
+            plot = plot.y_scale(Scale::Log);
+        }
         plot.title(title)
     }
+}
+
+/// Converts one series' points into chart columns under `options`,
+/// collecting restart boundaries (as x-position bit patterns, set-dedupable).
+fn push_series(
+    points: &vertov_model::Points,
+    label: String,
+    options: &ChartOptions,
+    series: &mut Vec<ChartSeries>,
+    boundaries: &mut BTreeSet<u64>,
+) {
+    if points.is_empty() {
+        return;
+    }
+    let xs: Vec<f64> = match options.x_axis {
+        XAxis::Step => points.steps.iter().map(|&step| step as f64).collect(),
+        XAxis::Wall => points.walls.clone(),
+        XAxis::Relative => {
+            let first = points.walls[0];
+            points.walls.iter().map(|wall| wall - first).collect()
+        }
+    };
+    for &boundary in &points.boundaries {
+        boundaries.insert(xs[boundary].to_bits());
+    }
+    let smoothed = options.smooth.map(|alpha| stat::ewma(&points.values, alpha));
+    series.push(ChartSeries {
+        label,
+        xs,
+        values: points.values.clone(),
+        smoothed,
+    });
 }

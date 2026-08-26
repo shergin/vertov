@@ -12,6 +12,7 @@ mod ls;
 mod summary;
 mod table;
 mod tail;
+mod tui;
 
 use std::process::ExitCode;
 use std::time::Duration;
@@ -26,6 +27,7 @@ const HELP: &str = "\
 vertov — a terminal viewer for ML training runs
 
 Usage:
+  vertov <logdir>                  # the TUI: runs table, scalars, live tail
   vertov show <logdir> -t <tag> [chart options]
   vertov tail <logdir> -t <tag> [--interval SECS] [chart options]
   vertov ls <logdir> [--runs SUBSTR] [--csv | --json]
@@ -33,6 +35,7 @@ Usage:
   vertov export <logdir> [--runs SUBSTR] [--csv | --json]
 
 Commands:
+  (none)   A logdir alone opens the TUI. `?` inside lists the keys.
   show     Render matching scalar series to stdout, once.
   tail     Live chart on stderr, repainted in place as the logdir grows.
            Ctrl-C stops; the final frame stays in your scrollback.
@@ -79,6 +82,7 @@ struct Args {
 }
 
 enum Command {
+    Tui,
     Show,
     Tail,
     Ls,
@@ -100,6 +104,7 @@ fn main() -> ExitCode {
         }
     };
     let result = match &args.command {
+        Command::Tui => tui::run(&args),
         Command::Show => show(&args),
         Command::Tail => tail::run(&args),
         Command::Ls => ls::run(&args),
@@ -179,7 +184,16 @@ fn parse_args() -> Result<Option<Args>, lexopt::Error> {
         return Ok(None);
     };
     let mut positionals = positionals.into_iter();
-    let logdir = positionals.next().ok_or("missing <logdir>")?;
+    // A bare path (not a command name) opens the TUI on it: `vertov runs/`.
+    let known_command = matches!(
+        command_name.as_str(),
+        "show" | "tail" | "ls" | "summary" | "export"
+    );
+    let logdir = if known_command {
+        positionals.next().ok_or("missing <logdir>")?
+    } else {
+        command_name.clone()
+    };
     let command = match command_name.as_str() {
         "show" => Command::Show,
         "tail" => Command::Tail,
@@ -188,7 +202,7 @@ fn parse_args() -> Result<Option<Args>, lexopt::Error> {
             run: positionals.next().ok_or("missing <run> (see `vertov ls`)")?,
         },
         "export" => Command::Export,
-        other => return Err(format!("unknown command `{other}`").into()),
+        _ => Command::Tui,
     };
     if let Some(extra) = positionals.next() {
         return Err(format!("unexpected argument `{extra}`").into());
@@ -250,6 +264,7 @@ fn chart_options(args: &Args) -> ChartOptions {
         x_axis: args.x_axis,
         smooth: args.smooth,
         runs_filter: args.runs_filter.clone(),
+        log_y: false,
     }
 }
 
