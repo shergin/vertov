@@ -12,6 +12,7 @@
 
 pub mod crc;
 pub mod event;
+pub mod reader;
 pub mod record;
 mod wire;
 
@@ -20,5 +21,6 @@ pub use event::{
     DataClass, DataType, Event, EventPayload, Histogram, Image, SummaryMetadata, SummaryPayload,
     SummaryValue, Tensor,
 };
+pub use reader::{EventFileReader, ReadEventError};
 pub use record::{ChecksumError, ReadRecordError, Record, RecordReader};
 pub use wire::DecodeError;
