@@ -19,3 +19,18 @@ Recorded 2026-08-26, Apple M1 Pro, 32 GB, macOS 15 (Darwin 25.5), rustc
 
 Budget: a 1M-point series cold-loads in under 250 ms of parse time on this
 class of hardware.
+
+## vertov-model catalog scan (`crates/vertov-model/benches/scan.rs`)
+
+A generated on-disk logdir: 1000 runs × 5 series × 100 points (500k points),
+so numbers include real file I/O through the page cache.
+
+| bench | what | time |
+|---|---|---|
+| `cold_1000_runs` | discover + ingest everything into summaries | 602 ms |
+| `quiet_tick_1000_runs` | one refresh with nothing changed (walk + drain + stat) | 24 ms |
+
+Recorded 2026-08-26, same hardware as above.
+
+Budgets: a 1000-run cold scan under 1 s; a quiet poll tick under 100 ms —
+comfortably inside a 5 s poll interval.

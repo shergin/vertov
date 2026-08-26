@@ -9,3 +9,10 @@ description = "Unified data model for vertov: catalog, exact summaries, restart 
 
 [dependencies]
 tfevents = { path = "../tfevents", version = "0.1" }
+
+[dev-dependencies]
+criterion = "0.5"
+
+[[bench]]
+name = "scan"
+harness = false
