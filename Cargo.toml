@@ -1,0 +1,13 @@
+# Workspace layout follows malevich's pattern: `default-members` keeps the core
+# build/test set lean (the readers), while the binary crate carries the heavy
+# deps (ratatui, malevich) and is built explicitly with `-p vertov`.
+[workspace]
+members = ["crates/tfevents"]
+default-members = ["crates/tfevents"]
+resolver = "3"
+
+[workspace.package]
+edition = "2024"
+rust-version = "1.88"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/shergin/vertov"

@@ -1,0 +1,24 @@
+# vertov
+
+**TensorBoard for people who live in ssh.** A read-only terminal viewer for ML
+training runs: point it at a logdir and get live charts, a runs table, and
+comparison views — rendered by [malevich](https://github.com/shergin/malevich),
+reading the files that trainers already write. No server, no SDK, no browser.
+
+```sh
+vertov runs/                  # TUI: runs table, scalars, live tail
+vertov show runs/ -t loss     # headless: chart to the terminal, kaz-style
+vertov export runs/ --csv     # escape hatch: flat runs × (params + metrics)
+```
+
+Early days. The vision and its rules live in [docs/vision.md](docs/vision.md);
+each principle is argued in [docs/principles/](docs/principles/).
+
+## Workspace
+
+- [`crates/tfevents`](crates/tfevents) — standalone TFRecord + Event decoding:
+  zero dependencies, hand-rolled varint/CRC32C, truncation-tolerant, resumable.
+
+## License
+
+MIT or Apache-2.0, at your option.
