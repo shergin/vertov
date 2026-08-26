@@ -242,23 +242,35 @@ impl Default for RecordReader {
 
 /// Extends `buf` from `reader` until it holds `want` bytes, tracking consumed
 /// bytes. Returns `Truncated` on end-of-file short of the goal.
+///
+/// Reads land directly in `buf` (no intermediate copy), growing it in
+/// bounded steps so a hostile claimed length still cannot force a huge
+/// allocation ahead of bytes that actually exist.
 fn fill<R: Read>(
     reader: &mut R,
     buf: &mut Vec<u8>,
     want: usize,
     consumed: &mut u64,
 ) -> Result<(), ReadRecordError> {
-    let mut chunk = [0u8; 8192];
+    const STEP: usize = 64 * 1024;
     while buf.len() < want {
-        let goal = (want - buf.len()).min(chunk.len());
-        match reader.read(&mut chunk[..goal]) {
-            Ok(0) => return Err(ReadRecordError::Truncated),
+        let filled = buf.len();
+        let target = want.min(filled.saturating_add(STEP));
+        buf.resize(target, 0);
+        let result = reader.read(&mut buf[filled..target]);
+        match result {
             Ok(n) => {
-                buf.extend_from_slice(&chunk[..n]);
+                buf.truncate(filled + n);
                 *consumed += n as u64;
+                if n == 0 {
+                    return Err(ReadRecordError::Truncated);
+                }
             }
-            Err(err) if err.kind() == ErrorKind::Interrupted => {}
-            Err(err) => return Err(err.into()),
+            Err(err) if err.kind() == ErrorKind::Interrupted => buf.truncate(filled),
+            Err(err) => {
+                buf.truncate(filled);
+                return Err(err.into());
+            }
         }
     }
     Ok(())

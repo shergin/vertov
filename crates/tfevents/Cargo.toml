@@ -9,3 +9,10 @@ description = "Read TensorBoard tfevents files: TFRecord framing and minimal Eve
 keywords = ["tensorboard", "tfevents", "tfrecord", "parser"]
 categories = ["parser-implementations", "encoding"]
 readme = "README.md"
+
+[dev-dependencies]
+criterion = "0.5"
+
+[[bench]]
+name = "cold_load"
+harness = false
