@@ -18,6 +18,11 @@ each principle is argued in [docs/principles/](docs/principles/).
 
 - [`crates/tfevents`](crates/tfevents) — standalone TFRecord + Event decoding:
   zero dependencies, hand-rolled varint/CRC32C, truncation-tolerant, resumable.
+- [`crates/vertov`](crates/vertov) — the binary. Today: `show` (render scalar
+  series once) and `tail` (live chart with in-place repaint, poll-based so it
+  works on NFS). Build it with `cargo run -p vertov`.
+- [`fixtures/`](fixtures) — recorded logs from real writers, checked in with
+  the scripts that made them.
 
 ## License
 
