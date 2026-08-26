@@ -137,15 +137,45 @@ impl App {
         }
     }
 
+    /// The runs filter as a predicate when it parses as one; a plain
+    /// substring match on the run name otherwise (so typing stays forgiving
+    /// mid-expression).
+    fn parsed_filter(&self) -> Option<vertov_model::Predicate> {
+        if self.runs.filter.is_empty() {
+            return None;
+        }
+        vertov_model::Predicate::parse(&self.runs.filter).ok()
+    }
+
+    fn filter_passes(
+        &self,
+        predicate: Option<&vertov_model::Predicate>,
+        name: &str,
+        status: &str,
+        run: &vertov_model::Run,
+    ) -> bool {
+        if self.runs.filter.is_empty() {
+            return true;
+        }
+        match predicate {
+            Some(predicate) => predicate.matches(name, status, run),
+            None => name.contains(&self.runs.filter),
+        }
+    }
+
     /// The runs table under current filter and sort. Pure.
     pub fn run_rows(&self) -> Vec<RunRow> {
         let now = SystemTime::now();
         let window = Duration::from_secs(60).max(2 * self.interval);
+        let predicate = self.parsed_filter();
         let mut rows: Vec<RunRow> = self
             .project
             .runs
             .iter()
-            .filter(|(name, _)| self.runs.filter.is_empty() || name.contains(&self.runs.filter))
+            .filter(|(name, run)| {
+                let status = crate::status_text(run, now, window);
+                self.filter_passes(predicate.as_ref(), name, status, run)
+            })
             .map(|(name, run)| RunRow {
                 name: name.clone(),
                 status: crate::status_text(run, now, window),
@@ -207,11 +237,17 @@ impl App {
         if !self.runs.selected.is_empty() {
             return self.runs.selected.iter().cloned().collect();
         }
+        let now = SystemTime::now();
+        let window = Duration::from_secs(60).max(2 * self.interval);
+        let predicate = self.parsed_filter();
         self.project
             .runs
-            .keys()
-            .filter(|name| self.runs.filter.is_empty() || name.contains(&self.runs.filter))
-            .cloned()
+            .iter()
+            .filter(|(name, run)| {
+                let status = crate::status_text(run, now, window);
+                self.filter_passes(predicate.as_ref(), name, status, run)
+            })
+            .map(|(name, _)| name.clone())
             .collect()
     }
 

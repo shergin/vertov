@@ -217,7 +217,8 @@ fn draw_help(frame: &mut Frame, area: Rect) {
 
   runs:      j/k move · space select for overlay · Enter open scalars
              s sort column · S reverse
-  scalars:   j/k move tag · s/S smoothing -/+ · L log-y
+             / takes a predicate too: lr > 1e-3 and status == active
+  scalars:   j/k move tag (fuzzy /) · s/S smoothing -/+ · L log-y
              x cycle x axis: step/wall/relative · Esc back to runs";
     let lines = text.lines().count() as u16 + 2;
     let width = 64.min(area.width);

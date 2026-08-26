@@ -47,7 +47,10 @@ Chart options (show, tail):
   --smooth <F>      EWMA smoothing factor in [0,1) — smoothed line over the
                     faded raw one, TensorBoard's exact debiasing.
   -x, --x <AXIS>    X axis: step (default), wall, relative.
-  --runs <SUBSTR>   Only runs whose name contains SUBSTR.
+  --runs <FILTER>   A predicate over hparams, metrics, status, and name
+                    ('lr > 1e-3 and status == active'), or — when the text
+                    is not a predicate — a substring of the run name.
+                    Also accepted by ls and export.
       --width <N>   Frame width in cells (default: detected).
       --height <N>  Frame height in cells (default: detected).
 
@@ -241,6 +244,24 @@ fn load_project(args: &Args) -> std::io::Result<Project> {
         let _ = project.save_cache();
     }
     Ok(project)
+}
+
+/// `--runs` and the TUI filter accept either a predicate
+/// (`lr > 1e-3 and status == active`) or, when the text does not parse as
+/// one, a plain substring of the run name. Callers parse once and pass the
+/// result down.
+fn run_passes(
+    filter: Option<&str>,
+    predicate: Option<&vertov_model::Predicate>,
+    name: &str,
+    status: &str,
+    run: &Run,
+) -> bool {
+    match (filter, predicate) {
+        (None, _) => true,
+        (Some(_), Some(predicate)) => predicate.matches(name, status, run),
+        (Some(filter), None) => name.contains(filter),
+    }
 }
 
 fn status_text(run: &Run, now: std::time::SystemTime, window: Duration) -> &'static str {

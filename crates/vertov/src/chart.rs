@@ -68,11 +68,21 @@ impl ChartData {
         filter: &str,
         options: &ChartOptions,
     ) -> io::Result<ChartData> {
+        let now = std::time::SystemTime::now();
+        let window = std::time::Duration::from_secs(60);
+        let predicate = options
+            .runs_filter
+            .as_deref()
+            .and_then(|filter| vertov_model::Predicate::parse(filter).ok());
         let mut matches: Vec<(String, String)> = Vec::new();
         for (run_name, run) in &project.runs {
-            if let Some(runs_filter) = &options.runs_filter
-                && !run_name.contains(runs_filter.as_str())
-            {
+            if !crate::run_passes(
+                options.runs_filter.as_deref(),
+                predicate.as_ref(),
+                run_name,
+                crate::status_text(run, now, window),
+                run,
+            ) {
                 continue;
             }
             for (tag, series) in &run.series {

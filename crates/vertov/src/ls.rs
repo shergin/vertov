@@ -7,12 +7,21 @@ pub fn run(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
     let project = load_project(args)?;
     let now = std::time::SystemTime::now();
     let window = std::time::Duration::from_secs(60);
+    let predicate = args
+        .runs_filter
+        .as_deref()
+        .and_then(|filter| vertov_model::Predicate::parse(filter).ok());
 
     let mut rows = Vec::new();
     for (name, run) in &project.runs {
-        if let Some(filter) = &args.runs_filter
-            && !name.contains(filter.as_str())
-        {
+        let status = crate::status_text(run, now, window);
+        if !crate::run_passes(
+            args.runs_filter.as_deref(),
+            predicate.as_ref(),
+            name,
+            status,
+            run,
+        ) {
             continue;
         }
         let points: u64 = run.series.values().map(|series| series.summary.count()).sum();

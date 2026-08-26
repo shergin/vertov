@@ -11,13 +11,26 @@ use crate::{Args, load_project};
 
 pub fn run(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
     let project = load_project(args)?;
+    let now = std::time::SystemTime::now();
+    let window = std::time::Duration::from_secs(60);
+    let predicate = args
+        .runs_filter
+        .as_deref()
+        .and_then(|filter| vertov_model::Predicate::parse(filter).ok());
+    let passes = |name: &str, run: &vertov_model::Run| {
+        crate::run_passes(
+            args.runs_filter.as_deref(),
+            predicate.as_ref(),
+            name,
+            crate::status_text(run, now, window),
+            run,
+        )
+    };
 
     let mut param_keys = BTreeSet::new();
     let mut metric_tags = BTreeSet::new();
     for (name, run) in &project.runs {
-        if let Some(filter) = &args.runs_filter
-            && !name.contains(filter.as_str())
-        {
+        if !passes(name, run) {
             continue;
         }
         param_keys.extend(run.hparams.keys().cloned());
@@ -35,9 +48,7 @@ pub fn run(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
 
     let mut rows = Vec::new();
     for (name, run) in &project.runs {
-        if let Some(filter) = &args.runs_filter
-            && !name.contains(filter.as_str())
-        {
+        if !passes(name, run) {
             continue;
         }
         let mut row = vec![Cell::Text(name.clone())];

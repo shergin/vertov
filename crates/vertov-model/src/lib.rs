@@ -15,10 +15,12 @@
 
 mod cache;
 pub mod moments;
+pub mod predicate;
 pub mod project;
 pub mod series;
 
 pub use moments::Moments;
+pub use predicate::Predicate;
 pub use project::{Project, RefreshReport, Run, RunStatus};
 pub use series::{Ghost, PointStamp, Points, SegmentSummary, Series, SeriesClass, SeriesSummary};
 // Part of this crate's public surface: `Run::hparams` values are this type.
