@@ -17,10 +17,16 @@ each principle is argued in [docs/principles/](docs/principles/).
 ## Workspace
 
 - [`crates/tfevents`](crates/tfevents) — standalone TFRecord + Event decoding:
-  zero dependencies, hand-rolled varint/CRC32C, truncation-tolerant, resumable.
-- [`crates/vertov`](crates/vertov) — the binary. Today: `show` (render scalar
-  series once) and `tail` (live chart with in-place repaint, poll-based so it
-  works on NFS). Build it with `cargo run -p vertov`.
+  zero dependencies, hand-rolled varint/CRC32C, truncation-tolerant, resumable,
+  fuzzed.
+- [`crates/vertov-model`](crates/vertov-model) — the unified data model:
+  catalog, exact mergeable summaries for every series, restart segments with
+  RustBoard's preemption semantics (ghost tails kept), the reload loop, and an
+  on-disk summary cache for warm starts.
+- [`crates/vertov`](crates/vertov) — the binary. Today: `show` (chart once,
+  with `--smooth` and `--x step|wall|relative`), `tail` (live chart with
+  in-place repaint, poll-based so it works on NFS), and `ls` / `summary` /
+  `export` tables in text, CSV, or JSON. Build it with `cargo run -p vertov`.
 - [`fixtures/`](fixtures) — recorded logs from real writers, checked in with
   the scripts that made them.
 
