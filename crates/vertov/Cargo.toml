@@ -1,0 +1,21 @@
+[package]
+name = "vertov"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "A terminal viewer for ML training runs: live charts over ssh, reading the files trainers already write"
+keywords = ["tensorboard", "terminal", "machine-learning", "visualization"]
+categories = ["command-line-utilities", "visualization"]
+
+[dependencies]
+tfevents = { path = "../tfevents", version = "0.1" }
+malevich = "1.18"
+# lexopt over clap, kaz's precedent: ~0 extra deps, no proc-macro tree, and
+# the cost — writing --help by hand — is the point.
+lexopt = "0.3"
+
+# Only for the live-mode SIGINT handler that restores the cursor on Ctrl-C.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"

@@ -2,7 +2,7 @@
 # build/test set lean (the readers), while the binary crate carries the heavy
 # deps (ratatui, malevich) and is built explicitly with `-p vertov`.
 [workspace]
-members = ["crates/tfevents"]
+members = ["crates/tfevents", "crates/vertov"]
 default-members = ["crates/tfevents"]
 resolver = "3"
 
