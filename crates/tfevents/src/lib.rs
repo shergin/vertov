@@ -11,5 +11,7 @@
 #![warn(missing_docs)]
 
 pub mod crc;
+pub mod record;
 
 pub use crc::MaskedCrc;
+pub use record::{ChecksumError, ReadRecordError, Record, RecordReader};
