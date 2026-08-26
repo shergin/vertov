@@ -16,6 +16,7 @@ pub mod hparams;
 pub mod reader;
 pub mod record;
 mod wire;
+pub mod writer;
 
 pub use crc::MaskedCrc;
 pub use event::{
