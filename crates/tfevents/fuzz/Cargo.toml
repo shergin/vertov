@@ -1,0 +1,37 @@
+[package]
+name = "tfevents-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+# Self-rooted: this crate must never join the main workspace (nightly-only
+# build, sanitizer flags, libfuzzer deps).
+[workspace]
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+tfevents = { path = ".." }
+
+[[bin]]
+name = "read_events"
+path = "fuzz_targets/read_events.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "decode_event"
+path = "fuzz_targets/decode_event.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "decode_hparams"
+path = "fuzz_targets/decode_hparams.rs"
+test = false
+doc = false
+bench = false

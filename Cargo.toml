@@ -5,6 +5,9 @@
 members = ["crates/tfevents", "crates/vertov"]
 default-members = ["crates/tfevents"]
 resolver = "3"
+# The fuzz crate is its own workspace: it builds only under cargo-fuzz on
+# nightly and its deps must never touch the main graph.
+exclude = ["crates/tfevents/fuzz"]
 
 [workspace.package]
 edition = "2024"
