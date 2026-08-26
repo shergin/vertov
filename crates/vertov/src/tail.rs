@@ -61,7 +61,7 @@ fn repaint(args: &Args, project: &mut Project) -> io::Result<()> {
             last_change = Instant::now();
         }
         if changed || !drawn_once {
-            let data = ChartData::collect(project, &args.tag)?;
+            let data = ChartData::collect(project, &args.tag, &crate::chart_options(args))?;
             // Re-detect every draw so a terminal resize follows along.
             let frame = sized(Frame::detect_for(&io::stderr()), args);
             let status = status_line(project, args, last_change);

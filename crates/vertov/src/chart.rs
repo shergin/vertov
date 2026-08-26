@@ -4,18 +4,48 @@
 use std::collections::BTreeSet;
 use std::io;
 
-use malevich::{Line, Plot, Rule};
+use malevich::{Color, Line, Plot, Rule, stat};
 
 use vertov_model::{Project, SeriesClass};
 
 /// More series than this and the chart is soup; the title says what was cut.
 const MAX_SERIES: usize = 16;
 
+/// Which column drives the x axis.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum XAxis {
+    /// Global step.
+    Step,
+    /// Wall-clock seconds since the epoch.
+    Wall,
+    /// Wall-clock seconds since each series' first point.
+    Relative,
+}
+
+/// Chart-shaping options shared by `show` and `tail`.
+pub struct ChartOptions {
+    pub x_axis: XAxis,
+    /// EWMA factor in `[0, 1)`: smoothed line over the faded raw one —
+    /// smoothing is a labeled overlay, never a replacement.
+    pub smooth: Option<f64>,
+    /// Only runs whose name contains this.
+    pub runs_filter: Option<String>,
+}
+
+/// One drawn series: label, x column, raw values, and the optional
+/// smoothed overlay.
+struct ChartSeries {
+    label: String,
+    xs: Vec<f64>,
+    values: Vec<f64>,
+    smoothed: Option<Vec<f64>>,
+}
+
 /// Owned series data for one chart: labels and columns the plot borrows
 /// from, plus restart boundaries drawn as vertical rules.
 pub struct ChartData {
-    series: Vec<(String, Vec<f64>, Vec<f64>)>,
-    /// Steps where a restart segment begins, across the drawn series.
+    series: Vec<ChartSeries>,
+    /// X positions where a restart segment begins, across the drawn series.
     boundaries: Vec<f64>,
     /// Series beyond [`MAX_SERIES`], dropped from the chart and counted in
     /// the title rather than silently.
@@ -27,9 +57,18 @@ pub struct ChartData {
 impl ChartData {
     /// Finds scalar series matching `filter` (substring), materializes up
     /// to [`MAX_SERIES`] of them, and snapshots their columns.
-    pub fn collect(project: &mut Project, filter: &str) -> io::Result<ChartData> {
+    pub fn collect(
+        project: &mut Project,
+        filter: &str,
+        options: &ChartOptions,
+    ) -> io::Result<ChartData> {
         let mut matches: Vec<(String, String)> = Vec::new();
         for (run_name, run) in &project.runs {
+            if let Some(runs_filter) = &options.runs_filter
+                && !run_name.contains(runs_filter.as_str())
+            {
+                continue;
+            }
             for (tag, series) in &run.series {
                 if series.class == SeriesClass::Scalar && tag.contains(filter) {
                     matches.push((run_name.clone(), tag.clone()));
@@ -51,20 +90,35 @@ impl ChartData {
             if points.is_empty() {
                 continue;
             }
-            let steps: Vec<f64> = points.steps.iter().map(|&step| step as f64).collect();
+            let xs: Vec<f64> = match options.x_axis {
+                XAxis::Step => points.steps.iter().map(|&step| step as f64).collect(),
+                XAxis::Wall => points.walls.clone(),
+                XAxis::Relative => {
+                    let first = points.walls[0];
+                    points.walls.iter().map(|wall| wall - first).collect()
+                }
+            };
             for &boundary in &points.boundaries {
-                boundaries.insert(points.steps[boundary]);
+                boundaries.insert(xs[boundary].to_bits());
             }
+            let smoothed = options
+                .smooth
+                .map(|alpha| stat::ewma(&points.values, alpha));
             let label = if multi_run {
                 format!("{run} {tag}")
             } else {
                 tag.clone()
             };
-            series.push((label, steps, points.values.clone()));
+            series.push(ChartSeries {
+                label,
+                xs,
+                values: points.values.clone(),
+                smoothed,
+            });
         }
         Ok(ChartData {
             series,
-            boundaries: boundaries.into_iter().map(|step| step as f64).collect(),
+            boundaries: boundaries.into_iter().map(f64::from_bits).collect(),
             cut,
             run_count,
         })
@@ -74,12 +128,19 @@ impl ChartData {
         self.series.is_empty()
     }
 
-    /// The chart: one line per series, a vertical rule per restart
-    /// boundary, legend from labels, title as given.
+    /// The chart: one line per series (faded raw under the smoothed overlay
+    /// when smoothing is on), a vertical rule per restart boundary, legend
+    /// from labels, title as given.
     pub fn plot<'a>(&'a self, title: &str) -> Plot<'a> {
         let mut plot = Plot::new();
-        for (label, steps, values) in &self.series {
-            plot = plot.layer(Line::xy(&steps[..], &values[..]).label(label.as_str()));
+        for series in &self.series {
+            let raw = Line::xy(&series.xs[..], &series.values[..]);
+            plot = match &series.smoothed {
+                Some(smoothed) => plot.layer(raw.color(Color::BrightBlack)).layer(
+                    Line::xy(&series.xs[..], &smoothed[..]).label(series.label.as_str()),
+                ),
+                None => plot.layer(raw.label(series.label.as_str())),
+            };
         }
         for (index, &boundary) in self.boundaries.iter().enumerate() {
             let rule = Rule::v(boundary);

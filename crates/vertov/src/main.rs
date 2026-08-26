@@ -1,52 +1,77 @@
 //! vertov — a terminal viewer for ML training runs.
 //!
-//! The Phase 0 spike: `show` renders matching scalar series once, `tail`
-//! live-plots them with in-place repaint. Data comes from tfevents files the
-//! trainer already writes; vertov only ever reads.
+//! Headless commands (kaz's philosophy: data on stdout, zero rendering
+//! logic outside the library): `show` renders matching scalar series once,
+//! `tail` live-plots them, `ls`/`summary`/`export` print tables in text,
+//! CSV, or JSON. Data comes from the files trainers already write; vertov
+//! only ever reads.
 
 mod chart;
+mod export;
+mod ls;
+mod summary;
+mod table;
 mod tail;
 
 use std::process::ExitCode;
 use std::time::Duration;
 
 use malevich::Frame;
-use vertov_model::{Project, SeriesClass};
+use vertov_model::{Project, Run, RunStatus, SeriesClass};
 
-use chart::ChartData;
+use chart::{ChartData, ChartOptions, XAxis};
+use table::Format;
 
 const HELP: &str = "\
 vertov — a terminal viewer for ML training runs
 
 Usage:
-  vertov show <logdir> -t <tag> [--width N] [--height N]
-  vertov tail <logdir> -t <tag> [--interval SECS] [--width N] [--height N]
+  vertov show <logdir> -t <tag> [chart options]
+  vertov tail <logdir> -t <tag> [--interval SECS] [chart options]
+  vertov ls <logdir> [--runs SUBSTR] [--csv | --json]
+  vertov summary <logdir> <run> [--csv | --json]
+  vertov export <logdir> [--runs SUBSTR] [--csv | --json]
 
 Commands:
-  show   Render matching scalar series to stdout, once.
-  tail   Live chart on stderr, repainted in place as the logdir grows.
-         Ctrl-C stops; the final frame stays in your scrollback.
+  show     Render matching scalar series to stdout, once.
+  tail     Live chart on stderr, repainted in place as the logdir grows.
+           Ctrl-C stops; the final frame stays in your scrollback.
+  ls       Runs table: status, series, points, restarts, last step, duration.
+  summary  One run, every series: exact accumulators, never samples.
+  export   Flat runs × (params + metrics) table; last value per scalar tag.
+
+Chart options (show, tail):
+  --smooth <F>      EWMA smoothing factor in [0,1) — smoothed line over the
+                    faded raw one, TensorBoard's exact debiasing.
+  -x, --x <AXIS>    X axis: step (default), wall, relative.
+  --runs <SUBSTR>   Only runs whose name contains SUBSTR.
+      --width <N>   Frame width in cells (default: detected).
+      --height <N>  Frame height in cells (default: detected).
 
 Options:
   -t, --tag <TAG>       Tag filter: matches any scalar tag containing TAG.
-      --interval <SECS> Poll interval for tail (default 5; NFS-friendly polling,
-                        no inotify required).
-      --width <N>       Frame width in cells (default: detected).
-      --height <N>      Frame height in cells (default: detected).
+      --interval <SECS> Poll interval for tail (default 5; NFS-friendly
+                        polling, no inotify required).
+      --csv, --json     Table output for ls/summary/export (default: text).
       --no-cache        Skip the summary cache (~/.cache/vertov/); always
                         re-read from the logdir. The cache is disposable —
                         deleting it by hand is always safe too.
   -h, --help            This help.
 
 Examples:
-  vertov show runs/ -t loss
+  vertov show runs/ -t loss --smooth 0.97
   vertov tail runs/ -t 'train/loss' --interval 2
+  vertov export runs/ --csv > runs.csv
 ";
 
 struct Args {
     command: Command,
     logdir: String,
     tag: String,
+    runs_filter: Option<String>,
+    format: Format,
+    smooth: Option<f64>,
+    x_axis: XAxis,
     interval: Duration,
     width: Option<usize>,
     height: Option<usize>,
@@ -56,6 +81,9 @@ struct Args {
 enum Command {
     Show,
     Tail,
+    Ls,
+    Summary { run: String },
+    Export,
 }
 
 fn main() -> ExitCode {
@@ -71,9 +99,12 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    let result = match args.command {
+    let result = match &args.command {
         Command::Show => show(&args),
         Command::Tail => tail::run(&args),
+        Command::Ls => ls::run(&args),
+        Command::Summary { run } => summary::run(&args, &run.clone()),
+        Command::Export => export::run(&args),
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,
@@ -87,9 +118,13 @@ fn main() -> ExitCode {
 fn parse_args() -> Result<Option<Args>, lexopt::Error> {
     use lexopt::prelude::*;
 
-    let mut command = None;
-    let mut logdir = None;
+    let mut command_name: Option<String> = None;
+    let mut positionals: Vec<String> = Vec::new();
     let mut tag = None;
+    let mut runs_filter = None;
+    let mut format = Format::Text;
+    let mut smooth = None;
+    let mut x_axis = XAxis::Step;
     let mut interval = Duration::from_secs(5);
     let mut width = None;
     let mut height = None;
@@ -98,22 +133,33 @@ fn parse_args() -> Result<Option<Args>, lexopt::Error> {
     let mut parser = lexopt::Parser::from_env();
     while let Some(arg) = parser.next()? {
         match arg {
-            Value(value) if command.is_none() => {
-                command = Some(match value.to_string_lossy().as_ref() {
-                    "show" => Command::Show,
-                    "tail" => Command::Tail,
-                    other => {
-                        return Err(format!("unknown command `{other}`").into());
-                    }
-                });
+            Value(value) if command_name.is_none() => {
+                command_name = Some(value.string()?);
             }
-            Value(value) if logdir.is_none() => {
-                logdir = Some(value.string()?);
-            }
-            Value(value) => {
-                return Err(format!("unexpected argument `{}`", value.to_string_lossy()).into());
-            }
+            Value(value) => positionals.push(value.string()?),
             Short('t') | Long("tag") => tag = Some(parser.value()?.string()?),
+            Long("runs") => runs_filter = Some(parser.value()?.string()?),
+            Long("csv") => format = Format::Csv,
+            Long("json") => format = Format::Json,
+            Long("smooth") => {
+                let factor: f64 = parser.value()?.parse()?;
+                if !(0.0..1.0).contains(&factor) {
+                    return Err("--smooth must be in [0, 1)".to_owned().into());
+                }
+                smooth = Some(factor);
+            }
+            Short('x') | Long("x") => {
+                x_axis = match parser.value()?.string()?.as_str() {
+                    "step" => XAxis::Step,
+                    "wall" => XAxis::Wall,
+                    "relative" => XAxis::Relative,
+                    other => {
+                        return Err(
+                            format!("unknown x axis `{other}` (step|wall|relative)").into()
+                        );
+                    }
+                };
+            }
             Long("interval") => {
                 let seconds: f64 = parser.value()?.parse()?;
                 if !seconds.is_finite() || seconds <= 0.0 {
@@ -129,20 +175,82 @@ fn parse_args() -> Result<Option<Args>, lexopt::Error> {
         }
     }
 
-    let Some(command) = command else {
+    let Some(command_name) = command_name else {
         return Ok(None);
     };
-    let logdir = logdir.ok_or("missing <logdir>")?;
-    let tag = tag.ok_or("missing -t <tag> (vertov never renders all tags unasked)")?;
+    let mut positionals = positionals.into_iter();
+    let logdir = positionals.next().ok_or("missing <logdir>")?;
+    let command = match command_name.as_str() {
+        "show" => Command::Show,
+        "tail" => Command::Tail,
+        "ls" => Command::Ls,
+        "summary" => Command::Summary {
+            run: positionals.next().ok_or("missing <run> (see `vertov ls`)")?,
+        },
+        "export" => Command::Export,
+        other => return Err(format!("unknown command `{other}`").into()),
+    };
+    if let Some(extra) = positionals.next() {
+        return Err(format!("unexpected argument `{extra}`").into());
+    }
+    let tag = match command {
+        Command::Show | Command::Tail => {
+            tag.ok_or("missing -t <tag> (vertov never renders all tags unasked)")?
+        }
+        _ => tag.unwrap_or_default(),
+    };
     Ok(Some(Args {
         command,
         logdir,
         tag,
+        runs_filter,
+        format,
+        smooth,
+        x_axis,
         interval,
         width,
         height,
         no_cache,
     }))
+}
+
+/// Opens the project, warms it from the summary cache unless `--no-cache`,
+/// refreshes once, and saves the cache back (best-effort — the cache is an
+/// accelerator, never a requirement).
+fn load_project(args: &Args) -> std::io::Result<Project> {
+    let mut project = Project::new(&args.logdir);
+    if !args.no_cache {
+        project.load_cache();
+    }
+    project.refresh()?;
+    if !args.no_cache {
+        let _ = project.save_cache();
+    }
+    Ok(project)
+}
+
+fn status_text(run: &Run, now: std::time::SystemTime, window: Duration) -> &'static str {
+    match run.status(now, window) {
+        RunStatus::Active => "active",
+        RunStatus::Idle => "idle",
+        RunStatus::Unknown => "?",
+    }
+}
+
+fn hparam_text(value: &vertov_model::HparamValue) -> String {
+    match value {
+        vertov_model::HparamValue::F64(v) => v.to_string(),
+        vertov_model::HparamValue::String(v) => v.clone(),
+        vertov_model::HparamValue::Bool(v) => v.to_string(),
+    }
+}
+
+fn chart_options(args: &Args) -> ChartOptions {
+    ChartOptions {
+        x_axis: args.x_axis,
+        smooth: args.smooth,
+        runs_filter: args.runs_filter.clone(),
+    }
 }
 
 fn sized(mut frame: Frame, args: &Args) -> Frame {
@@ -179,16 +287,8 @@ fn title(args: &Args, data: &ChartData, project: &Project, live: Option<&str>) -
 }
 
 fn show(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
-    let mut project = Project::new(&args.logdir);
-    if !args.no_cache {
-        project.load_cache();
-    }
-    project.refresh()?;
-    if !args.no_cache {
-        // Best-effort: the cache is an accelerator, never a requirement.
-        let _ = project.save_cache();
-    }
-    let data = ChartData::collect(&mut project, &args.tag)?;
+    let mut project = load_project(args)?;
+    let data = ChartData::collect(&mut project, &args.tag, &chart_options(args))?;
     if data.is_empty() {
         return Err(no_match_message(args, &project).into());
     }

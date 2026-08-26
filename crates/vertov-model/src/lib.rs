@@ -21,3 +21,5 @@ pub mod series;
 pub use moments::Moments;
 pub use project::{Project, RefreshReport, Run, RunStatus};
 pub use series::{Ghost, PointStamp, Points, SegmentSummary, Series, SeriesClass, SeriesSummary};
+// Part of this crate's public surface: `Run::hparams` values are this type.
+pub use tfevents::HparamValue;
