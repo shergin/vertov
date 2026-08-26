@@ -118,6 +118,36 @@ fn tensorboardx_fixture_parses_fully() {
 }
 
 #[test]
+fn tensorboardx_hparams_fixture_yields_typed_values() {
+    let path = fixture_events_file("tensorboardx-hparams/hparam-session");
+    let events = read_all(&path);
+
+    let mut hparams = None;
+    let mut final_loss = None;
+    for event in &events {
+        let EventPayload::Summary(values) = &event.payload else {
+            continue;
+        };
+        for value in values {
+            if let Some(decoded) = tfevents::session_start_hparams(value) {
+                hparams = Some(decoded.unwrap());
+            }
+            if value.tag == "metrics/final_loss" {
+                final_loss = value.scalar();
+            }
+        }
+    }
+
+    let hparams = hparams.expect("session_start_info present");
+    use tfevents::HparamValue;
+    assert_eq!(hparams["lr"], HparamValue::F64(0.001));
+    assert_eq!(hparams["optimizer"], HparamValue::String("adam".into()));
+    assert_eq!(hparams["amsgrad"], HparamValue::Bool(true));
+    assert_eq!(hparams["layers"], HparamValue::F64(4.0));
+    assert_eq!(final_loss, Some(0.75));
+}
+
+#[test]
 fn tensorboardx_fixture_checksums_are_valid() {
     // The reader skips payload checksums on the hot path; verify here that
     // every record in the recorded file actually carries a valid one.

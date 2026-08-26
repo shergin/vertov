@@ -34,8 +34,27 @@ def accuracy(step: int) -> float:
     return 1.0 - math.exp(-0.2 * step) * 0.9
 
 
+def record_hparams(outdir: Path) -> None:
+    """A separate fixture dir: add_hparams writes the hparams-plugin markers
+    (experiment, session_start_info with typed values, session_end_info) into
+    a sub-run named `hparam-session`."""
+    if outdir.exists():
+        shutil.rmtree(outdir)
+    writer = SummaryWriter(logdir=str(outdir), flush_secs=10**6)
+    writer.add_hparams(
+        {"lr": 0.001, "optimizer": "adam", "amsgrad": True, "layers": 4},
+        {"metrics/final_loss": 0.75},
+        name="hparam-session",
+    )
+    writer.close()
+    for file in sorted(outdir.rglob("*")):
+        if file.is_file():
+            print(f"{file.relative_to(outdir)}: {file.stat().st_size} bytes")
+
+
 def main() -> None:
     outdir = Path(sys.argv[1] if len(sys.argv) > 1 else Path(__file__).parent.parent / "tensorboardx")
+    record_hparams(outdir.parent / "tensorboardx-hparams")
     if outdir.exists():
         shutil.rmtree(outdir)
     writer = SummaryWriter(logdir=str(outdir), flush_secs=10**6)
