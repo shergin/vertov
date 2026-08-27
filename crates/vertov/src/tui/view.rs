@@ -761,6 +761,80 @@ mod tests {
     }
 
     #[test]
+    fn enter_replaces_a_selection_the_cursor_left() {
+        use crossterm::event::{KeyCode, KeyEvent};
+        let (mut app, _guard) = test_app("enter-scope");
+        app.runs.cursor = Some("adam".to_owned());
+        app.update(KeyEvent::from(KeyCode::Enter));
+        assert_eq!(app.scoped_runs(), vec!["adam"]);
+        assert_eq!(app.view, View::Scalars);
+        // Point somewhere new: the old scope is over.
+        app.update(KeyEvent::from(KeyCode::Esc));
+        app.runs.cursor = Some("sgd".to_owned());
+        app.update(KeyEvent::from(KeyCode::Enter));
+        assert_eq!(app.scoped_runs(), vec!["sgd"]);
+    }
+
+    #[test]
+    fn escape_clears_selection_then_filter_then_leaves_scalars() {
+        use crossterm::event::{KeyCode, KeyEvent};
+        let (mut app, _guard) = test_app("esc-progressive");
+        app.runs.selected.insert("adam".to_owned());
+        app.runs.filter = "ad".to_owned();
+        app.update(KeyEvent::from(KeyCode::Esc));
+        assert!(app.runs.selected.is_empty());
+        assert_eq!(app.runs.filter, "ad");
+        app.update(KeyEvent::from(KeyCode::Esc));
+        assert!(app.runs.filter.is_empty());
+
+        app.view = View::Scalars;
+        app.scalars.filter = "loss".to_owned();
+        app.update(KeyEvent::from(KeyCode::Esc));
+        assert!(app.scalars.filter.is_empty());
+        assert_eq!(app.view, View::Scalars);
+        app.update(KeyEvent::from(KeyCode::Esc));
+        assert_eq!(app.view, View::Runs);
+    }
+
+    #[test]
+    fn smoothing_snaps_to_exact_zero() {
+        use crossterm::event::{KeyCode, KeyEvent};
+        let (mut app, _guard) = test_app("smooth-snap");
+        app.view = View::Scalars;
+        for _ in 0..3 {
+            app.update(KeyEvent::from(KeyCode::Char('S')));
+        }
+        assert!((app.scalars.smooth - 0.3).abs() < 1e-12);
+        for _ in 0..3 {
+            app.update(KeyEvent::from(KeyCode::Char('s')));
+        }
+        assert_eq!(app.scalars.smooth, 0.0, "must be exactly zero");
+    }
+
+    #[test]
+    fn alt_modified_chars_do_not_enter_filters() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let (mut app, _guard) = test_app("alt-chars");
+        app.update(KeyEvent::from(KeyCode::Char('/')));
+        assert!(app.runs.editing_filter);
+        app.update(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::ALT));
+        assert_eq!(app.runs.filter, "", "Esc+g over ssh must not type a g");
+        app.update(KeyEvent::from(KeyCode::Char('g')));
+        assert_eq!(app.runs.filter, "g");
+    }
+
+    #[test]
+    fn empty_hint_names_the_narrowing_state() {
+        let (mut app, _guard) = test_app("empty-hint");
+        assert_eq!(empty_hint(&app), "no matching series");
+        app.runs.filter = "zzz".to_owned();
+        app.working_set = Some(Default::default());
+        let hint = empty_hint(&app);
+        assert!(hint.contains("runs filter"), "{hint}");
+        assert!(hint.contains("working set"), "{hint}");
+    }
+
+    #[test]
     fn keep_and_exclude_refine_the_working_set() {
         use crossterm::event::{KeyCode, KeyEvent};
         let (mut app, _guard) = test_app("working-set");

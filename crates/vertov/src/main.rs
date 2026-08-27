@@ -220,6 +220,18 @@ fn parse_args() -> Result<Option<Args>, lexopt::Error> {
     let logdir = if known_command {
         positionals.next().ok_or("missing <logdir>")?
     } else {
+        // The bare-path TUI form. A first word that is neither a command
+        // nor anything path-like is almost certainly a typo'd command —
+        // say so instead of waiting on a logdir named `frobnicate`.
+        if positionals.len() > 0
+            || (!std::path::Path::new(&command_name).exists()
+                && !command_name.contains(['/', '.', '~']))
+        {
+            return Err(format!(
+                "unknown command `{command_name}` (show|tail|ls|summary|export, or a logdir path)"
+            )
+            .into());
+        }
         command_name.clone()
     };
     let command = match command_name.as_str() {
