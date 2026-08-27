@@ -440,6 +440,7 @@ impl App {
             runs_filter: None,
             log_y: self.scalars.log_y,
             show_ghosts: self.scalars.show_ghosts,
+            tokens_tag: None,
         }
     }
 
@@ -463,14 +464,14 @@ impl App {
                     return Ok(());
                 };
                 for run in self.scoped_runs() {
-                    self.project.materialize(&run, &tag)?;
+                    self.materialize_with_counter(&run, &tag)?;
                 }
             }
             View::Compare => {
                 let (tags, runs) = self.compare_scope();
                 for tag in &tags {
                     for run in &runs {
-                        self.project.materialize(run, tag)?;
+                        self.materialize_with_counter(run, tag)?;
                     }
                 }
             }
@@ -480,6 +481,22 @@ impl App {
                 }
             }
             View::Runs | View::Hparams => {}
+        }
+        Ok(())
+    }
+
+    /// Materializes a series and, when the tokens axis is active, its run's
+    /// token counter too.
+    fn materialize_with_counter(&mut self, run: &str, tag: &str) -> std::io::Result<()> {
+        self.project.materialize(run, tag)?;
+        if self.scalars.x_axis == XAxis::Tokens
+            && let Some(counter_tag) = self
+                .project
+                .runs
+                .get(run)
+                .and_then(|r| r.token_counter(None))
+        {
+            self.project.materialize(run, &counter_tag)?;
         }
         Ok(())
     }
@@ -695,7 +712,8 @@ impl App {
                 self.scalars.x_axis = match self.scalars.x_axis {
                     XAxis::Step => XAxis::Wall,
                     XAxis::Wall => XAxis::Relative,
-                    XAxis::Relative => XAxis::Step,
+                    XAxis::Relative => XAxis::Tokens,
+                    XAxis::Tokens => XAxis::Step,
                 };
             }
             KeyCode::Char('L') => self.scalars.log_y = !self.scalars.log_y,

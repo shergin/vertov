@@ -156,6 +156,40 @@ fn show_chart_golden() {
 }
 
 #[test]
+fn tokens_axis_maps_and_reports_gaps() {
+    let logdir = Logdir::new("tokens-axis");
+    // `metered` logs a token counter covering steps 0..=6; its loss goes to
+    // step 9, so three points sit outside coverage. `plain` has no counter.
+    let mut metered: Vec<Vec<u8>> = (0..10)
+        .map(|step| scalar_event(wall(step), step, "loss", 5.0 - 0.5 * step as f32))
+        .collect();
+    for step in [0, 2, 4, 6] {
+        metered.push(scalar_event(wall(step), step, "tokens", step as f32 * 1024.0));
+    }
+    logdir.write(
+        "metered/events.out.tfevents.1000.host",
+        &events_file(&metered),
+    );
+    let plain: Vec<Vec<u8>> = (0..5)
+        .map(|step| scalar_event(wall(step), step, "loss", 1.0))
+        .collect();
+    logdir.write("plain/events.out.tfevents.1000.host", &events_file(&plain));
+
+    let (stdout, _, ok) = vertov(
+        &logdir.0,
+        &["show", "-t", "loss", "-x", "tokens", "--width", "70", "--height", "12"],
+    );
+    assert!(ok, "{stdout}");
+    // The metered run draws (its counter reaches 6144 tokens); the plain
+    // run is skipped loudly, and out-of-coverage points are counted.
+    assert!(stdout.contains("1 runs lack a token counter"), "{stdout}");
+    assert!(stdout.contains("3 pts outside counter"), "{stdout}");
+    assert!(stdout.contains("metered loss"), "{stdout}");
+    // Interpolated odd steps land between counter points: max x is 6144.
+    assert!(stdout.contains("6"), "{stdout}");
+}
+
+#[test]
 fn missing_tag_lists_alternatives() {
     let logdir = standard_logdir("missing-tag");
     let (_, stderr, ok) = vertov(&logdir.0, &["show", "-t", "nope"]);

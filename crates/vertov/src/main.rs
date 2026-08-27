@@ -46,7 +46,9 @@ Commands:
 Chart options (show, tail):
   --smooth <F>      EWMA smoothing factor in [0,1) — smoothed line over the
                     faded raw one, TensorBoard's exact debiasing.
-  -x, --x <AXIS>    X axis: step (default), wall, relative.
+  -x, --x <AXIS>    X axis: step (default), wall, relative, tokens.
+  --tokens-tag <T>  The token-counter series for `-x tokens` (default:
+                    conventional names — tokens, consumed_tokens, ...).
   --runs <FILTER>   A predicate over hparams, metrics, status, and name
                     ('lr > 1e-3 and status == active'), or — when the text
                     is not a predicate — a substring of the run name.
@@ -88,6 +90,7 @@ struct Args {
     no_cache: bool,
     no_pixels: bool,
     show_ghosts: bool,
+    tokens_tag: Option<String>,
 }
 
 enum Command {
@@ -145,6 +148,7 @@ fn parse_args() -> Result<Option<Args>, lexopt::Error> {
     let mut no_cache = false;
     let mut no_pixels = false;
     let mut show_ghosts = false;
+    let mut tokens_tag = None;
 
     let mut parser = lexopt::Parser::from_env();
     while let Some(arg) = parser.next()? {
@@ -169,13 +173,16 @@ fn parse_args() -> Result<Option<Args>, lexopt::Error> {
                     "step" => XAxis::Step,
                     "wall" => XAxis::Wall,
                     "relative" => XAxis::Relative,
+                    "tokens" => XAxis::Tokens,
                     other => {
-                        return Err(
-                            format!("unknown x axis `{other}` (step|wall|relative)").into()
-                        );
+                        return Err(format!(
+                            "unknown x axis `{other}` (step|wall|relative|tokens)"
+                        )
+                        .into());
                     }
                 };
             }
+            Long("tokens-tag") => tokens_tag = Some(parser.value()?.string()?),
             Long("interval") => {
                 let seconds: f64 = parser.value()?.parse()?;
                 if !seconds.is_finite() || seconds <= 0.0 {
@@ -248,6 +255,7 @@ fn parse_args() -> Result<Option<Args>, lexopt::Error> {
         no_cache,
         no_pixels,
         show_ghosts,
+        tokens_tag,
     }))
 }
 
@@ -307,6 +315,7 @@ fn chart_options(args: &Args) -> ChartOptions {
         runs_filter: args.runs_filter.clone(),
         log_y: false,
         show_ghosts: args.show_ghosts,
+        tokens_tag: args.tokens_tag.clone(),
     }
 }
 
@@ -336,6 +345,12 @@ fn title(args: &Args, data: &ChartData, project: &Project, live: Option<&str>) -
     }
     if project.dead_files > 0 {
         let _ = write!(title, " · {} dead files", project.dead_files);
+    }
+    if data.runs_without_counter > 0 {
+        let _ = write!(title, " · {} runs lack a token counter", data.runs_without_counter);
+    }
+    if data.tokens_dropped > 0 {
+        let _ = write!(title, " · {} pts outside counter", data.tokens_dropped);
     }
     if let Some(live) = live {
         let _ = write!(title, " · {live}");

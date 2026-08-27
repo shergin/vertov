@@ -424,6 +424,13 @@ fn chart_title(app: &App, tag: &str, data: &ChartData) -> String {
         crate::chart::XAxis::Step => {}
         crate::chart::XAxis::Wall => title.push_str(" · wall"),
         crate::chart::XAxis::Relative => title.push_str(" · relative"),
+        crate::chart::XAxis::Tokens => title.push_str(" · tokens"),
+    }
+    if data.runs_without_counter > 0 {
+        let _ = write!(title, " · {} runs lack a counter", data.runs_without_counter);
+    }
+    if data.tokens_dropped > 0 {
+        let _ = write!(title, " · {} pts outside counter", data.tokens_dropped);
     }
     title
 }
@@ -490,7 +497,7 @@ fn draw_help(frame: &mut Frame, area: Rect) {
                 s sort column · S reverse
                 / takes a predicate too: lr > 1e-3 and status == active
   scalars:      j/k move tag (fuzzy /) · s/S smoothing -/+ · L log-y
-                x cycle x axis: step/wall/relative · v ghost tails
+                x cycle x axis: step/wall/relative/tokens · v ghost tails
                 Esc back to runs (compare shares these keys)
   distributions: j/k move histogram tag · Esc back to runs";
     let lines = text.lines().count() as u16 + 2;

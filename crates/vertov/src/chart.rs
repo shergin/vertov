@@ -20,6 +20,10 @@ pub enum XAxis {
     Wall,
     /// Wall-clock seconds since each series' first point.
     Relative,
+    /// Consumed tokens, mapped through each run's token-counter series
+    /// (steps between counter points interpolate linearly; points outside
+    /// its coverage are dropped and counted, never guessed).
+    Tokens,
 }
 
 /// Chart-shaping options shared by `show`, `tail`, and the TUI.
@@ -35,6 +39,9 @@ pub struct ChartOptions {
     /// Draw preempted ghost tails as faded lines — data honesty over
     /// tidiness, on demand.
     pub show_ghosts: bool,
+    /// Explicit token-counter tag for [`XAxis::Tokens`]; `None` tries the
+    /// conventional names.
+    pub tokens_tag: Option<String>,
 }
 
 /// One drawn series: label, x column, raw values, the optional smoothed
@@ -62,6 +69,10 @@ pub struct ChartData {
     pub cut: usize,
     /// Runs contributing at least one drawn series.
     pub run_count: usize,
+    /// Points dropped by the tokens axis for lack of counter coverage.
+    pub tokens_dropped: usize,
+    /// Runs skipped by the tokens axis because no counter series was found.
+    pub runs_without_counter: usize,
 }
 
 impl ChartData {
@@ -103,18 +114,48 @@ impl ChartData {
 
         let mut series = Vec::new();
         let mut boundaries = BTreeSet::new();
+        let mut tokens_dropped = 0;
+        let mut runs_without_counter = std::collections::BTreeSet::new();
         for (run, tag) in &matches {
-            let Some(points) = project.materialize(run, tag)? else {
+            // Materialize first (target, then the token counter when the
+            // axis needs it), read immutably after.
+            let counter_tag = if options.x_axis == XAxis::Tokens {
+                let counter_tag = project
+                    .runs
+                    .get(run)
+                    .and_then(|r| r.token_counter(options.tokens_tag.as_deref()));
+                match counter_tag {
+                    Some(counter_tag) => {
+                        project.materialize(run, &counter_tag)?;
+                        Some(counter_tag)
+                    }
+                    None => {
+                        runs_without_counter.insert(run.clone());
+                        continue;
+                    }
+                }
+            } else {
+                None
+            };
+            project.materialize(run, tag)?;
+            let Some(points) = project.points(run, tag) else {
                 continue;
             };
+            let counter = counter_tag
+                .as_deref()
+                .and_then(|counter_tag| project.points(run, counter_tag));
             let label = if multi_run {
                 format!("{run} {tag}")
             } else {
                 tag.clone()
             };
-            push_series(points, label, options, &mut series, &mut boundaries);
+            tokens_dropped +=
+                push_series(points, counter, label, options, &mut series, &mut boundaries);
         }
-        Ok(ChartData::assemble(series, boundaries, options, cut, run_count))
+        let mut data = ChartData::assemble(series, boundaries, options, cut, run_count);
+        data.tokens_dropped = tokens_dropped;
+        data.runs_without_counter = runs_without_counter.len();
+        Ok(data)
     }
 
     /// One exact tag across the given runs (the TUI's shape). Reads only
@@ -132,6 +173,8 @@ impl ChartData {
         let mut series = Vec::new();
         let mut boundaries = BTreeSet::new();
         let mut run_count = 0;
+        let mut tokens_dropped = 0;
+        let mut runs_without_counter = 0;
         for run in shown {
             let Some(points) = project.points(run, tag) else {
                 continue;
@@ -139,11 +182,29 @@ impl ChartData {
             if points.is_empty() {
                 continue;
             }
+            let counter = if options.x_axis == XAxis::Tokens {
+                let counter = project
+                    .runs
+                    .get(run)
+                    .and_then(|r| r.token_counter(options.tokens_tag.as_deref()))
+                    .and_then(|counter_tag| project.points(run, &counter_tag));
+                if counter.is_none() {
+                    runs_without_counter += 1;
+                    continue;
+                }
+                counter
+            } else {
+                None
+            };
             run_count += 1;
             let label = if multi_run { run.clone() } else { tag.to_owned() };
-            push_series(points, label, options, &mut series, &mut boundaries);
+            tokens_dropped +=
+                push_series(points, counter, label, options, &mut series, &mut boundaries);
         }
-        ChartData::assemble(series, boundaries, options, cut, run_count)
+        let mut data = ChartData::assemble(series, boundaries, options, cut, run_count);
+        data.tokens_dropped = tokens_dropped;
+        data.runs_without_counter = runs_without_counter;
+        data
     }
 
     fn assemble(
@@ -160,6 +221,8 @@ impl ChartData {
             log_y: options.log_y,
             cut,
             run_count,
+            tokens_dropped: 0,
+            runs_without_counter: 0,
         }
     }
 
@@ -335,53 +398,103 @@ impl DistData {
 }
 
 /// Converts one series' points into chart columns under `options`,
-/// collecting restart boundaries (as x-position bit patterns, set-dedupable).
+/// collecting restart boundaries (as x-position bit patterns,
+/// set-dedupable). Returns how many points the tokens axis had to drop for
+/// lack of counter coverage.
 fn push_series(
     points: &vertov_model::Points,
+    counter: Option<&vertov_model::Points>,
     label: String,
     options: &ChartOptions,
     series: &mut Vec<ChartSeries>,
     boundaries: &mut BTreeSet<u64>,
-) {
+) -> usize {
     if points.is_empty() {
-        return;
+        return 0;
     }
-    let xs: Vec<f64> = match options.x_axis {
-        XAxis::Step => points.steps.iter().map(|&step| step as f64).collect(),
-        XAxis::Wall => points.walls.clone(),
-        XAxis::Relative => {
-            let first = points.walls[0];
-            points.walls.iter().map(|wall| wall - first).collect()
+    let first_wall = points.walls[0];
+    let mut dropped = 0;
+    let mut columns = |steps: &[i64], walls: &[f64], values: &[f64]| -> (Vec<f64>, Vec<f64>) {
+        match options.x_axis {
+            XAxis::Step => (steps.iter().map(|&step| step as f64).collect(), values.to_vec()),
+            XAxis::Wall => (walls.to_vec(), values.to_vec()),
+            XAxis::Relative => (
+                walls.iter().map(|wall| wall - first_wall).collect(),
+                values.to_vec(),
+            ),
+            XAxis::Tokens => {
+                let counter = counter.expect("caller guarantees a counter for tokens");
+                let mut xs = Vec::with_capacity(steps.len());
+                let mut kept = Vec::with_capacity(values.len());
+                for (index, &step) in steps.iter().enumerate() {
+                    match tokens_for(counter, step) {
+                        Some(tokens) => {
+                            xs.push(tokens);
+                            kept.push(values[index]);
+                        }
+                        None => dropped += 1,
+                    }
+                }
+                (xs, kept)
+            }
         }
     };
-    for &boundary in &points.boundaries {
-        boundaries.insert(xs[boundary].to_bits());
-    }
-    let smoothed = options.smooth.map(|alpha| stat::ewma(&points.values, alpha));
+
+    let (xs, values) = columns(&points.steps, &points.walls, &points.values);
     let ghosts = if options.show_ghosts {
         points
             .ghosts
             .iter()
-            .map(|ghost| {
-                let xs: Vec<f64> = match options.x_axis {
-                    XAxis::Step => ghost.steps.iter().map(|&step| step as f64).collect(),
-                    XAxis::Wall => ghost.walls.clone(),
-                    XAxis::Relative => {
-                        let first = points.walls[0];
-                        ghost.walls.iter().map(|wall| wall - first).collect()
-                    }
-                };
-                (xs, ghost.values.clone())
-            })
+            .map(|ghost| columns(&ghost.steps, &ghost.walls, &ghost.values))
+            .filter(|(xs, _)| !xs.is_empty())
             .collect()
     } else {
         Vec::new()
     };
+    if xs.is_empty() {
+        return dropped;
+    }
+    for &boundary in &points.boundaries {
+        let x = match options.x_axis {
+            XAxis::Step => Some(points.steps[boundary] as f64),
+            XAxis::Wall => Some(points.walls[boundary]),
+            XAxis::Relative => Some(points.walls[boundary] - first_wall),
+            XAxis::Tokens => tokens_for(
+                counter.expect("caller guarantees a counter for tokens"),
+                points.steps[boundary],
+            ),
+        };
+        if let Some(x) = x {
+            boundaries.insert(x.to_bits());
+        }
+    }
+    let smoothed = options.smooth.map(|alpha| stat::ewma(&values, alpha));
     series.push(ChartSeries {
         label,
         xs,
-        values: points.values.clone(),
+        values,
         smoothed,
         ghosts,
     });
+    dropped
+}
+
+/// The token count at `step`, from the counter's materialized points: exact
+/// where the counter logged that step, linearly interpolated between
+/// neighbors, and `None` outside its coverage — never extrapolated.
+fn tokens_for(counter: &vertov_model::Points, step: i64) -> Option<f64> {
+    match counter.steps.binary_search(&step) {
+        Ok(index) => Some(counter.values[index]).filter(|value| value.is_finite()),
+        Err(0) => None,
+        Err(index) if index == counter.steps.len() => None,
+        Err(index) => {
+            let (step_before, step_after) =
+                (counter.steps[index - 1] as f64, counter.steps[index] as f64);
+            let (before, after) = (counter.values[index - 1], counter.values[index]);
+            if !before.is_finite() || !after.is_finite() {
+                return None;
+            }
+            Some(before + (after - before) * (step as f64 - step_before) / (step_after - step_before))
+        }
+    }
 }

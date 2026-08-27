@@ -67,6 +67,36 @@ impl Run {
         }
     }
 
+    /// The series counting consumed tokens, for a tokens x axis. An
+    /// `explicit` tag wins (resolved exactly, then as a unique
+    /// `/`-suffix); otherwise the conventional names are tried in order.
+    /// LR schedules and anneal points are defined in tokens — this is what
+    /// lets plots be too.
+    pub fn token_counter(&self, explicit: Option<&str>) -> Option<String> {
+        const CONVENTIONS: &[&str] = &[
+            "tokens",
+            "consumed_tokens",
+            "total_tokens",
+            "num_tokens",
+            "tokens_seen",
+        ];
+        let resolve = |wanted: &str| -> Option<String> {
+            if self.series.contains_key(wanted) {
+                return Some(wanted.to_owned());
+            }
+            let suffix = format!("/{wanted}");
+            let mut matches = self.series.keys().filter(|tag| tag.ends_with(&suffix));
+            if let (Some(tag), None) = (matches.next(), matches.next()) {
+                return Some(tag.clone());
+            }
+            None
+        };
+        match explicit {
+            Some(explicit) => resolve(explicit),
+            None => CONVENTIONS.iter().find_map(|candidate| resolve(candidate)),
+        }
+    }
+
     /// Status by modification recency: `Active` if a file changed within
     /// `window` of `now`.
     pub fn status(&self, now: SystemTime, window: Duration) -> RunStatus {
