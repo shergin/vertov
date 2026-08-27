@@ -23,10 +23,15 @@ each principle is argued in [docs/principles/](docs/principles/).
   catalog, exact mergeable summaries for every series, restart segments with
   RustBoard's preemption semantics (ghost tails kept), the reload loop, and an
   on-disk summary cache for warm starts.
-- [`crates/vertov`](crates/vertov) — the binary. Today: `show` (chart once,
-  with `--smooth` and `--x step|wall|relative`), `tail` (live chart with
-  in-place repaint, poll-based so it works on NFS), and `ls` / `summary` /
-  `export` tables in text, CSV, or JSON. Build it with `cargo run -p vertov`.
+- [`crates/vertov`](crates/vertov) — the binary. `vertov <logdir>` opens the
+  TUI: a sortable runs table with a predicate filter bar
+  (`lr > 1e-3 and status == active`), a scalars view with smoothing, log-y,
+  and switchable x axis, live polling that never loses cursor/selection/
+  filter state, one-keystroke CSV export — and chart panels drawn as real
+  antialiased images where the terminal speaks sixel, kitty, or iTerm2
+  graphics (cell glyphs as the honest fallback). Headless: `show`, `tail`,
+  `ls`, `summary`, `export` in text, CSV, or JSON.
+  Build it with `cargo run -p vertov`.
 - [`fixtures/`](fixtures) — recorded logs from real writers, checked in with
   the scripts that made them.
 
