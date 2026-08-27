@@ -21,12 +21,12 @@ pub fn run(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
     }
     project.refresh()?;
     let mut app = App::new(project, args.interval, &args.tag);
-    if !args.no_pixels {
-        // Probe before raw mode (§5.6): the capability query reads terminal
-        // replies, which a raw-mode event loop would swallow as input. The
-        // result is cached for the process.
-        app.graphics = malevich::pixel::Capabilities::detect_for(&std::io::stdout()).best();
-    }
+    // Probe before raw mode (§5.6): the capability query reads terminal
+    // replies, which a raw-mode event loop would swallow as input. The
+    // result is cached for the process. A forced protocol skips the probe.
+    app.graphics = args
+        .pixels
+        .graphics(|| malevich::pixel::Capabilities::detect_for(&std::io::stdout()));
 
     let mut terminal = ratatui::init();
     let result = event_loop(&mut terminal, &mut app);

@@ -190,6 +190,30 @@ fn tokens_axis_maps_and_reports_gaps() {
 }
 
 #[test]
+fn forced_pixel_protocols_emit_their_wire_format() {
+    let logdir = standard_logdir("pixel-force");
+    // kitty: APC direct transmission of raw RGBA.
+    let (stdout, _, ok) = vertov(
+        &logdir.0,
+        &["show", "-t", "train/loss", "--pixels", "kitty", "--width", "60", "--height", "14"],
+    );
+    assert!(ok);
+    assert!(stdout.contains("\x1b_G"), "kitty APC missing");
+    assert!(stdout.contains("a=T,f=32"), "kitty transmission options missing");
+    // sixel: a DCS block.
+    let (stdout, _, ok) = vertov(
+        &logdir.0,
+        &["show", "-t", "train/loss", "--pixels", "sixel", "--width", "60", "--height", "14"],
+    );
+    assert!(ok);
+    assert!(stdout.contains("\x1bP"), "sixel DCS missing");
+    // And a pipe without forcing stays plain text, ghostty env or not.
+    let (stdout, _, ok) = vertov(&logdir.0, &["show", "-t", "train/loss"]);
+    assert!(ok);
+    assert!(!stdout.contains("\x1b_G") && !stdout.contains("\x1bP"));
+}
+
+#[test]
 fn missing_tag_lists_alternatives() {
     let logdir = standard_logdir("missing-tag");
     let (_, stderr, ok) = vertov(&logdir.0, &["show", "-t", "nope"]);

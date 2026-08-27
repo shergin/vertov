@@ -65,9 +65,12 @@ Options:
       --no-cache        Skip the summary cache (~/.cache/vertov/); always
                         re-read from the logdir. The cache is disposable —
                         deleting it by hand is always safe too.
-      --pixels <MODE>   auto (default): TUI charts render as real images
-                        where the terminal speaks sixel/kitty/iTerm2, cell
-                        glyphs elsewhere. never: always cell glyphs.
+      --pixels <MODE>   auto (default): charts render as real images where
+                        the terminal speaks sixel/kitty/iTerm2, cell glyphs
+                        elsewhere. never: always cell glyphs. sixel, kitty,
+                        or iterm2: force that protocol (show and the TUI) —
+                        for terminals the probe misses, and for piping
+                        pixel output to files or decoders.
   -h, --help            This help.
 
 Examples:
@@ -88,9 +91,30 @@ struct Args {
     width: Option<usize>,
     height: Option<usize>,
     no_cache: bool,
-    no_pixels: bool,
+    pixels: PixelMode,
     show_ghosts: bool,
     tokens_tag: Option<String>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PixelMode {
+    Auto,
+    Never,
+    Force(malevich::pixel::Protocol),
+}
+
+impl PixelMode {
+    /// The graphics to draw with, given how the destination detects.
+    fn graphics(
+        self,
+        detect: impl FnOnce() -> malevich::pixel::Capabilities,
+    ) -> Option<malevich::pixel::Graphics> {
+        match self {
+            PixelMode::Auto => detect().best(),
+            PixelMode::Never => None,
+            PixelMode::Force(protocol) => Some(malevich::pixel::Graphics::new(protocol)),
+        }
+    }
 }
 
 enum Command {
@@ -146,7 +170,7 @@ fn parse_args() -> Result<Option<Args>, lexopt::Error> {
     let mut width = None;
     let mut height = None;
     let mut no_cache = false;
-    let mut no_pixels = false;
+    let mut pixels = PixelMode::Auto;
     let mut show_ghosts = false;
     let mut tokens_tag = None;
 
@@ -195,11 +219,18 @@ fn parse_args() -> Result<Option<Args>, lexopt::Error> {
             Long("no-cache") => no_cache = true,
             Long("ghosts") => show_ghosts = true,
             Long("pixels") => {
-                no_pixels = match parser.value()?.string()?.as_str() {
-                    "auto" => false,
-                    "never" => true,
+                use malevich::pixel::Protocol;
+                pixels = match parser.value()?.string()?.as_str() {
+                    "auto" => PixelMode::Auto,
+                    "never" => PixelMode::Never,
+                    "sixel" => PixelMode::Force(Protocol::Sixel),
+                    "kitty" => PixelMode::Force(Protocol::Kitty),
+                    "iterm2" => PixelMode::Force(Protocol::ITerm2),
                     other => {
-                        return Err(format!("unknown pixels mode `{other}` (auto|never)").into());
+                        return Err(format!(
+                            "unknown pixels mode `{other}` (auto|never|sixel|kitty|iterm2)"
+                        )
+                        .into());
                     }
                 };
             }
@@ -265,7 +296,7 @@ fn parse_args() -> Result<Option<Args>, lexopt::Error> {
         width,
         height,
         no_cache,
-        no_pixels,
+        pixels,
         show_ghosts,
         tokens_tag,
     }))
@@ -391,10 +422,22 @@ fn show(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
         return Err(no_match_message(args, &project).into());
     }
     let frame = sized(Frame::detect(), args);
-    print!(
-        "{}",
-        data.plot(&title(args, &data, &project, None)).render(&frame)
-    );
+    let plot = data.plot(&title(args, &data, &project, None));
+    // Auto upgrades to pixels only on a real terminal: a pipe gets plain
+    // text unless a protocol is forced (forcing is exactly how pixel
+    // output is piped to files and decoders on purpose).
+    use std::io::IsTerminal as _;
+    let graphics = match args.pixels {
+        PixelMode::Auto if std::io::stdout().is_terminal() => {
+            malevich::pixel::Capabilities::detect().best()
+        }
+        PixelMode::Auto | PixelMode::Never => None,
+        PixelMode::Force(protocol) => Some(malevich::pixel::Graphics::new(protocol)),
+    };
+    match graphics {
+        Some(graphics) => print!("{}", plot.render_pixels(&frame, &graphics)),
+        None => print!("{}", plot.render(&frame)),
+    }
     Ok(())
 }
 
