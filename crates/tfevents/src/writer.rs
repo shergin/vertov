@@ -45,6 +45,47 @@ pub fn scalar_event(wall_time: f64, step: i64, tag: &str, value: f32) -> Vec<u8>
     event
 }
 
+/// Encodes one TF1-style histogram event: a `HistogramProto` with the given
+/// `(left, right, count)` buckets under `tag`. Interior edges become
+/// `bucket_limit`s; the outer edges become `min`/`max`.
+pub fn histogram_event(
+    wall_time: f64,
+    step: i64,
+    tag: &str,
+    buckets: &[(f64, f64, f64)],
+) -> Vec<u8> {
+    let mut histogram = Vec::new();
+    let min = buckets.first().map_or(0.0, |bucket| bucket.0);
+    let max = buckets.last().map_or(0.0, |bucket| bucket.1);
+    let total: f64 = buckets.iter().map(|bucket| bucket.2).sum();
+    for (field, value) in [(1, min), (2, max), (3, total)] {
+        varint(field << 3 | 1, &mut histogram);
+        histogram.extend_from_slice(&f64::to_bits(value).to_le_bytes());
+    }
+    let mut limits = Vec::new();
+    let mut counts = Vec::new();
+    for &(_, right, count) in buckets {
+        limits.extend_from_slice(&right.to_bits().to_le_bytes());
+        counts.extend_from_slice(&count.to_bits().to_le_bytes());
+    }
+    field_bytes(6, &limits, &mut histogram);
+    field_bytes(7, &counts, &mut histogram);
+
+    let mut summary_value = Vec::new();
+    field_bytes(1, tag.as_bytes(), &mut summary_value);
+    field_bytes(5, &histogram, &mut summary_value);
+    let mut summary = Vec::new();
+    field_bytes(1, &summary_value, &mut summary);
+
+    let mut event = Vec::new();
+    varint(1 << 3 | 1, &mut event);
+    event.extend_from_slice(&wall_time.to_bits().to_le_bytes());
+    varint(2 << 3, &mut event);
+    varint(step as u64, &mut event);
+    field_bytes(5, &summary, &mut event);
+    event
+}
+
 /// A complete little events file: `file_version` followed by the given
 /// pre-encoded event payloads, each framed as a TFRecord.
 pub fn events_file(events: &[Vec<u8>]) -> Vec<u8> {

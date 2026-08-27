@@ -4,7 +4,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use tfevents::writer::{events_file, scalar_event, write_record};
+use tfevents::writer::{events_file, histogram_event, scalar_event, write_record};
 use vertov_model::{Project, RunStatus, SeriesClass};
 
 /// A scratch logdir, removed on drop.
@@ -215,6 +215,71 @@ fn nan_values_are_gaps_not_lies() {
     assert_eq!(summary.moments().count(), 2);
     let points = project.materialize("run", "loss").unwrap().unwrap();
     assert!(points.values[1].is_nan());
+}
+
+#[test]
+fn histogram_series_materialize_and_tail() {
+    let logdir = Logdir::new("histograms");
+    let file = "run/events.out.tfevents.1000.host";
+    let buckets = |scale: f64| vec![(-scale, 0.0, 3.0), (0.0, scale, 5.0)];
+    logdir.write(
+        file,
+        &events_file(&[
+            histogram_event(wall(0), 0, "params/w", &buckets(1.0)),
+            histogram_event(wall(1), 1, "params/w", &buckets(2.0)),
+        ]),
+    );
+
+    let mut project = Project::new(logdir.path());
+    project.refresh().unwrap();
+    assert_eq!(
+        project.runs["run"].series["params/w"].class,
+        SeriesClass::Histogram
+    );
+
+    let series = project
+        .materialize_histograms("run", "params/w")
+        .unwrap()
+        .unwrap();
+    assert_eq!(series.snapshots.len(), 2);
+    assert_eq!(series.snapshots[0].buckets, buckets(1.0));
+    assert_eq!(series.snapshots[1].buckets, buckets(2.0));
+
+    // Live growth appends into the materialized series without a re-read;
+    // a step rewind truncates (preemption applies to every series kind).
+    let mut growth = Vec::new();
+    write_record(&mut growth, &histogram_event(wall(2), 2, "params/w", &buckets(3.0)));
+    write_record(&mut growth, &histogram_event(wall(3), 1, "params/w", &buckets(9.0)));
+    logdir.append(file, &growth);
+    project.refresh().unwrap();
+
+    let series = project.histogram_series("run", "params/w").unwrap();
+    let steps: Vec<i64> = series.snapshots.iter().map(|snapshot| snapshot.step).collect();
+    assert_eq!(steps, vec![0, 1]);
+    assert_eq!(series.snapshots[1].buckets, buckets(9.0));
+    assert_eq!(series.boundaries, vec![1]);
+    // Scalars are untouched by a histogram preemption... and vice versa:
+    // the summary records it per tag.
+    assert_eq!(project.runs["run"].preemptions, 1);
+}
+
+#[test]
+fn real_fixture_histograms_materialize() {
+    let fixtures = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures");
+    let mut project = Project::new(fixtures.join("tensorboardx"));
+    project.refresh().unwrap();
+    let series = project
+        .materialize_histograms(".", "params/weights")
+        .unwrap()
+        .expect("fixture has histogram series");
+    assert_eq!(series.snapshots.len(), 4);
+    for snapshot in &series.snapshots {
+        let total: f64 = snapshot.buckets.iter().map(|(_, _, count)| count).sum();
+        assert_eq!(total, 101.0, "all 101 samples accounted per snapshot");
+        for pair in snapshot.buckets.windows(2) {
+            assert_eq!(pair[0].1, pair[1].0, "contiguous buckets");
+        }
+    }
 }
 
 #[test]

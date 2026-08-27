@@ -252,6 +252,47 @@ impl Points {
     }
 }
 
+/// One histogram observation: normalized `(left, right, count)` buckets at
+/// a step.
+#[derive(Clone, PartialEq, Debug)]
+pub struct HistogramSnapshot {
+    /// Global step.
+    pub step: i64,
+    /// Seconds since the Unix epoch.
+    pub wall: f64,
+    /// Contiguous buckets, left to right.
+    pub buckets: Vec<(f64, f64, f64)>,
+}
+
+/// Materialized histogram series: snapshots in step order, with restart
+/// boundaries. Preempted tails are truncated (unlike scalar [`Points`], no
+/// ghosts are kept — a re-read restores anything a view later wants).
+#[derive(Clone, PartialEq, Debug, Default)]
+pub struct HistogramSeries {
+    /// Snapshots, steps strictly increasing.
+    pub snapshots: Vec<HistogramSnapshot>,
+    /// Indices where a new restart segment begins.
+    pub boundaries: Vec<usize>,
+}
+
+impl HistogramSeries {
+    /// Appends one snapshot, applying step preemption.
+    pub fn push(&mut self, snapshot: HistogramSnapshot) {
+        if self
+            .snapshots
+            .last()
+            .is_some_and(|tail| snapshot.step <= tail.step)
+        {
+            let cut = self
+                .snapshots
+                .partition_point(|held| held.step < snapshot.step);
+            self.snapshots.truncate(cut);
+            self.boundaries.push(cut);
+        }
+        self.snapshots.push(snapshot);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

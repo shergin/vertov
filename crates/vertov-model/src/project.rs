@@ -17,7 +17,9 @@ use tfevents::{
     EventFileReader, EventPayload, HparamValue, ReadEventError, SummaryPayload, SummaryValue,
 };
 
-use crate::series::{PointStamp, Points, Series, SeriesClass, SeriesSummary};
+use crate::series::{
+    HistogramSeries, HistogramSnapshot, PointStamp, Points, Series, SeriesClass, SeriesSummary,
+};
 
 /// How a run is currently judged, from file-modification recency — the only
 /// signal tfevents offers. Display it with that provenance: "active" means
@@ -104,10 +106,19 @@ struct MaterializedSeries {
     touched: u64,
 }
 
+struct MaterializedHistograms {
+    series: HistogramSeries,
+    touched: u64,
+}
+
 /// Series materialized concurrently before the least-recently-used is
 /// dropped (re-materialization is always possible: the files are the
 /// database).
 const MATERIALIZE_CAP: usize = 64;
+
+/// Histogram series held concurrently — snapshots are bulkier than points,
+/// and the distributions view looks at one tag at a time.
+const HISTOGRAM_CAP: usize = 8;
 
 /// A scanned root: runs, series, summaries, open readers, and the
 /// materialization table.
@@ -123,6 +134,8 @@ pub struct Project {
     /// run name → tag → points, so the per-point hot path looks up with
     /// borrowed keys.
     materialized: BTreeMap<String, BTreeMap<String, MaterializedSeries>>,
+    /// Same shape for histogram series.
+    histograms: BTreeMap<String, BTreeMap<String, MaterializedHistograms>>,
     clock: u64,
     /// Resume state loaded from the summary cache, consumed as files open.
     cached: BTreeMap<PathBuf, crate::cache::CachedFile>,
@@ -142,6 +155,7 @@ impl Project {
             dead_files: 0,
             files: BTreeMap::new(),
             materialized: BTreeMap::new(),
+            histograms: BTreeMap::new(),
             clock: 0,
             cached: BTreeMap::new(),
             cache_dir: None,
@@ -280,7 +294,14 @@ impl Project {
             loop {
                 match state.reader.next_event() {
                     Ok(event) => {
-                        ingest(run, &mut self.materialized, &state.run, &event, &mut report);
+                        ingest(
+                            run,
+                            &mut self.materialized,
+                            &mut self.histograms,
+                            &state.run,
+                            &event,
+                            &mut report,
+                        );
                     }
                     Err(ReadEventError::Truncated) => break,
                     Err(
@@ -324,6 +345,7 @@ impl Project {
         for run in tainted {
             self.runs.remove(&run);
             self.materialized.remove(&run);
+            self.histograms.remove(&run);
             self.files.retain(|_, state| state.run != run);
         }
 
@@ -441,11 +463,122 @@ impl Project {
             .and_then(|tags| tags.get(tag))
             .map(|entry| &entry.points)
     }
+
+    /// Materializes one histogram series — the same transient full re-read
+    /// up to the committed frontier as [`materialize`](Self::materialize),
+    /// collecting normalized bucket snapshots instead of points.
+    pub fn materialize_histograms(
+        &mut self,
+        run_name: &str,
+        tag: &str,
+    ) -> io::Result<Option<&HistogramSeries>> {
+        self.clock += 1;
+        if let Some(entry) = self
+            .histograms
+            .get_mut(run_name)
+            .and_then(|tags| tags.get_mut(tag))
+        {
+            entry.touched = self.clock;
+            return Ok(Some(&self.histograms[run_name][tag].series));
+        }
+        let Some(series) = self
+            .runs
+            .get(run_name)
+            .and_then(|run| run.series.get(tag))
+        else {
+            return Ok(None);
+        };
+        if series.class != SeriesClass::Histogram {
+            return Ok(None);
+        }
+
+        let mut collected = HistogramSeries::default();
+        for (path, state) in &self.files {
+            if state.run != run_name {
+                continue;
+            }
+            let frontier = state.reader.committed_offset();
+            if frontier == 0 {
+                continue;
+            }
+            let file = match File::open(path) {
+                Ok(file) => file,
+                Err(err) if err.kind() == ErrorKind::NotFound => continue,
+                Err(err) => return Err(err),
+            };
+            let mut reader = EventFileReader::new(file.take(frontier));
+            loop {
+                match reader.next_event() {
+                    Ok(event) => {
+                        let EventPayload::Summary(values) = &event.payload else {
+                            continue;
+                        };
+                        for value in values {
+                            if value.tag == tag
+                                && let Some(buckets) = value.histogram_buckets()
+                            {
+                                collected.push(HistogramSnapshot {
+                                    step: event.step,
+                                    wall: event.wall_time,
+                                    buckets,
+                                });
+                            }
+                        }
+                    }
+                    Err(
+                        ReadEventError::Corrupt { .. } | ReadEventError::Malformed { .. },
+                    ) => {}
+                    Err(ReadEventError::Truncated | ReadEventError::BadLengthCrc { .. }) => {
+                        break;
+                    }
+                    Err(ReadEventError::Io(err)) => return Err(err),
+                }
+            }
+        }
+
+        let held: usize = self.histograms.values().map(BTreeMap::len).sum();
+        if held >= HISTOGRAM_CAP
+            && let Some((_, run, tag)) = self
+                .histograms
+                .iter()
+                .flat_map(|(run, tags)| {
+                    tags.iter()
+                        .map(move |(tag, entry)| (entry.touched, run.clone(), tag.clone()))
+                })
+                .min()
+            && let Some(tags) = self.histograms.get_mut(&run)
+        {
+            tags.remove(&tag);
+            if tags.is_empty() {
+                self.histograms.remove(&run);
+            }
+        }
+        self.histograms
+            .entry(run_name.to_owned())
+            .or_default()
+            .insert(
+                tag.to_owned(),
+                MaterializedHistograms {
+                    series: collected,
+                    touched: self.clock,
+                },
+            );
+        Ok(Some(&self.histograms[run_name][tag].series))
+    }
+
+    /// The materialized histogram series, if currently held.
+    pub fn histogram_series(&self, run_name: &str, tag: &str) -> Option<&HistogramSeries> {
+        self.histograms
+            .get(run_name)
+            .and_then(|tags| tags.get(tag))
+            .map(|entry| &entry.series)
+    }
 }
 
 fn ingest(
     run: &mut Run,
     materialized: &mut BTreeMap<String, BTreeMap<String, MaterializedSeries>>,
+    histograms: &mut BTreeMap<String, BTreeMap<String, MaterializedHistograms>>,
     run_name: &str,
     event: &tfevents::Event,
     report: &mut RefreshReport,
@@ -493,6 +626,18 @@ fn ingest(
                 .and_then(|tags| tags.get_mut(value.tag.as_str()))
         {
             entry.points.push(point);
+        }
+        if series.class == SeriesClass::Histogram
+            && let Some(entry) = histograms
+                .get_mut(run_name)
+                .and_then(|tags| tags.get_mut(value.tag.as_str()))
+            && let Some(buckets) = value.histogram_buckets()
+        {
+            entry.series.push(HistogramSnapshot {
+                step: event.step,
+                wall: event.wall_time,
+                buckets,
+            });
         }
     }
 }

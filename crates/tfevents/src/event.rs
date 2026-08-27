@@ -194,15 +194,11 @@ impl Tensor {
             return None;
         }
         let values = self.doubles()?;
-        if values.len() % 3 != 0 {
+        let (rows, rest) = values.as_chunks::<3>();
+        if !rest.is_empty() {
             return None;
         }
-        Some(
-            values
-                .chunks_exact(3)
-                .map(|row| (row[0], row[1], row[2]))
-                .collect(),
-        )
+        Some(rows.iter().map(|row| (row[0], row[1], row[2])).collect())
     }
 }
 
