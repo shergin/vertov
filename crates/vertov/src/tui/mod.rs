@@ -106,15 +106,24 @@ fn event_loop(
         }
 
         if event::poll(Duration::from_millis(200))? {
-            match event::read()? {
-                Event::Key(key) if key.kind != KeyEventKind::Release => {
-                    if app.update(key) == Action::Quit {
-                        return Ok(());
+            // Drain the whole queue before redrawing: key repeat (zoom,
+            // pan) arrives faster than a pixel frame renders, so handling
+            // one event per frame would grow an unbounded lag queue. A
+            // burst collapses into one repaint of the final state.
+            loop {
+                match event::read()? {
+                    Event::Key(key) if key.kind != KeyEventKind::Release => {
+                        if app.update(key) == Action::Quit {
+                            return Ok(());
+                        }
+                        emit_needed = true;
                     }
-                    emit_needed = true;
+                    Event::Resize(_, _) => emit_needed = true,
+                    _ => {}
                 }
-                Event::Resize(_, _) => emit_needed = true,
-                _ => {}
+                if !event::poll(Duration::ZERO)? {
+                    break;
+                }
             }
         }
 
