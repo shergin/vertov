@@ -122,6 +122,10 @@ pub struct ScalarsView {
     pub log_y: bool,
     /// Draw preempted ghost tails as faded lines.
     pub show_ghosts: bool,
+    /// The zoom window in the current axis's units; `None` = full extent.
+    pub x_window: Option<(f64, f64)>,
+    /// The crosshair x position; `None` = hidden.
+    pub crosshair: Option<f64>,
 }
 
 pub struct DistributionsView {
@@ -182,6 +186,8 @@ impl App {
                 x_axis: XAxis::Step,
                 log_y: false,
                 show_ghosts: false,
+                x_window: None,
+                crosshair: None,
             },
             distributions: DistributionsView {
                 cursor: None,
@@ -512,7 +518,22 @@ impl App {
             log_y: self.scalars.log_y,
             show_ghosts: self.scalars.show_ghosts,
             tokens_tag: None,
+            x_window: self.scalars.x_window,
+            crosshair: self.scalars.crosshair,
         }
+    }
+
+    /// The scalars chart as currently configured — shared by drawing and by
+    /// the zoom/crosshair keys (its series keep their full columns; the
+    /// window applies only at render).
+    pub fn scalars_chart(&self) -> Option<crate::chart::ChartData> {
+        let tag = self.current_tag()?;
+        Some(crate::chart::ChartData::for_tag(
+            &self.project,
+            &self.scoped_runs(),
+            &tag,
+            &self.chart_options(),
+        ))
     }
 
     /// Tags the Compare grid panels (visible scalar tags, capped) and the
@@ -702,6 +723,81 @@ impl App {
         }
     }
 
+    /// Moves the crosshair to the previous/next point of the first drawn
+    /// series (starting at the newest point), panning the window along
+    /// when it walks off an edge.
+    fn step_crosshair(&mut self, direction: i64) {
+        let Some(chart) = self.scalars_chart() else {
+            return;
+        };
+        let xs = chart.primary_xs();
+        if xs.is_empty() {
+            return;
+        }
+        let index = match self.scalars.crosshair {
+            None => xs.len() - 1,
+            Some(current) => {
+                let at = xs.partition_point(|&x| x < current);
+                let at = at.min(xs.len() - 1);
+                at.saturating_add_signed(direction as isize)
+                    .min(xs.len() - 1)
+            }
+        };
+        let x = xs[index];
+        self.scalars.crosshair = Some(x);
+        if let Some((from, to)) = self.scalars.x_window
+            && (x < from || x > to)
+        {
+            let width = to - from;
+            let (from, to) = if x < from {
+                (x, x + width)
+            } else {
+                (x - width, x)
+            };
+            self.scalars.x_window = Some(self.clamp_window(from, to));
+        }
+    }
+
+    /// Scales the window by `factor` around the crosshair (or the window
+    /// center). Factors below one zoom in; a window at full extent clears.
+    fn zoom(&mut self, factor: f64) {
+        let Some(extent) = self.scalars_chart().and_then(|chart| chart.x_extent()) else {
+            return;
+        };
+        let (from, to) = self.scalars.x_window.unwrap_or(extent);
+        let center = self
+            .scalars
+            .crosshair
+            .filter(|&x| x >= from && x <= to)
+            .unwrap_or((from + to) / 2.0);
+        let full = (extent.1 - extent.0).max(f64::MIN_POSITIVE);
+        let width = ((to - from) * factor).clamp(full / 512.0, full);
+        let ratio = if to > from { (center - from) / (to - from) } else { 0.5 };
+        let from = center - width * ratio;
+        let window = self.clamp_window(from, from + width);
+        self.scalars.x_window =
+            (window.1 - window.0 < full * 0.999).then_some(window);
+    }
+
+    /// Shifts the window by `fraction` of its width.
+    fn pan(&mut self, fraction: f64) {
+        let Some((from, to)) = self.scalars.x_window else {
+            return;
+        };
+        let shift = (to - from) * fraction;
+        self.scalars.x_window = Some(self.clamp_window(from + shift, to + shift));
+    }
+
+    /// Slides `(from, to)` back inside the data's full extent.
+    fn clamp_window(&self, from: f64, to: f64) -> (f64, f64) {
+        let Some(extent) = self.scalars_chart().and_then(|chart| chart.x_extent()) else {
+            return (from, to);
+        };
+        let width = to - from;
+        let from = from.max(extent.0).min(extent.1 - width);
+        (from, from + width)
+    }
+
     fn update_distributions(&mut self, key: KeyEvent) {
         let tags = self.histogram_tags();
         let position = self
@@ -832,9 +928,23 @@ impl App {
                     XAxis::Relative => XAxis::Tokens,
                     XAxis::Tokens => XAxis::Step,
                 };
+                // The window and crosshair are in the old axis's units;
+                // carrying them over would be a silent lie.
+                self.scalars.x_window = None;
+                self.scalars.crosshair = None;
             }
             KeyCode::Char('L') => self.scalars.log_y = !self.scalars.log_y,
             KeyCode::Char('v') => self.scalars.show_ghosts = !self.scalars.show_ghosts,
+            KeyCode::Left | KeyCode::Char('h') => self.step_crosshair(-1),
+            KeyCode::Right | KeyCode::Char('l') => self.step_crosshair(1),
+            KeyCode::Char('+' | '=') => self.zoom(1.0 / 1.5),
+            KeyCode::Char('-') => self.zoom(1.5),
+            KeyCode::Char('[') => self.pan(-0.25),
+            KeyCode::Char(']') => self.pan(0.25),
+            KeyCode::Char('0') => {
+                self.scalars.x_window = None;
+                self.scalars.crosshair = None;
+            }
             KeyCode::Esc => {
                 // Progressive escape: a committed tag filter first, then
                 // back to the runs table.

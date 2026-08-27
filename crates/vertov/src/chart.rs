@@ -42,6 +42,12 @@ pub struct ChartOptions {
     /// Explicit token-counter tag for [`XAxis::Tokens`]; `None` tries the
     /// conventional names.
     pub tokens_tag: Option<String>,
+    /// The visible x window (zoom), in the current axis's units. `None`
+    /// shows the full extent. M4 keeps fidelity at any window: reduction
+    /// happens per raster column inside the domain.
+    pub x_window: Option<(f64, f64)>,
+    /// The crosshair x position, drawn as a quiet vertical rule.
+    pub crosshair: Option<f64>,
 }
 
 /// One drawn series: label, x column, raw values, the optional smoothed
@@ -64,6 +70,10 @@ pub struct ChartData {
     time_x: bool,
     /// Log-10 y axis.
     log_y: bool,
+    /// The zoom window, with the y range refit to what it shows.
+    x_window: Option<(f64, f64)>,
+    y_window: Option<(f64, f64)>,
+    crosshair: Option<f64>,
     /// Series beyond [`MAX_SERIES`], dropped from the chart and counted in
     /// the title rather than silently.
     pub cut: usize,
@@ -214,11 +224,37 @@ impl ChartData {
         cut: usize,
         run_count: usize,
     ) -> ChartData {
+        // Zooming refits y to the visible points — otherwise a zoom only
+        // crops horizontally and magnifies nothing.
+        let y_window = options.x_window.and_then(|(from, to)| {
+            let mut min = f64::INFINITY;
+            let mut max = f64::NEG_INFINITY;
+            for one in &series {
+                for (&x, &y) in one.xs.iter().zip(&one.values) {
+                    if x >= from && x <= to && y.is_finite() {
+                        min = min.min(y);
+                        max = max.max(y);
+                    }
+                }
+                if let Some(smoothed) = &one.smoothed {
+                    for (&x, &y) in one.xs.iter().zip(smoothed) {
+                        if x >= from && x <= to && y.is_finite() {
+                            min = min.min(y);
+                            max = max.max(y);
+                        }
+                    }
+                }
+            }
+            (min < max).then_some((min, max))
+        });
         ChartData {
             series,
             boundaries: boundaries.into_iter().map(f64::from_bits).collect(),
             time_x: options.x_axis == XAxis::Wall,
             log_y: options.log_y,
+            x_window: options.x_window,
+            y_window,
+            crosshair: options.crosshair,
             cut,
             run_count,
             tokens_dropped: 0,
@@ -256,6 +292,17 @@ impl ChartData {
                 rule
             });
         }
+        if let Some(x) = self.crosshair {
+            plot = plot.layer(Rule::v(x).color(Color::BrightBlack));
+        }
+        if let Some((from, to)) = self.x_window {
+            plot = plot.x_domain(from, to);
+        }
+        if let Some((min, max)) = self.y_window
+            && (!self.log_y || min > 0.0)
+        {
+            plot = plot.y_domain(min, max);
+        }
         if self.time_x {
             plot = plot.x_scale(Scale::Time);
         }
@@ -263,6 +310,23 @@ impl ChartData {
             plot = plot.y_scale(Scale::Log);
         }
         plot.title(title)
+    }
+
+    /// The x positions of the first drawn series — what the crosshair
+    /// steps along.
+    pub fn primary_xs(&self) -> &[f64] {
+        self.series.first().map_or(&[], |series| &series.xs)
+    }
+
+    /// Every series' nearest point to `x`: `(label, exact x, exact value)`.
+    pub fn values_at(&self, x: f64) -> Vec<(&str, f64, f64)> {
+        self.series
+            .iter()
+            .filter_map(|series| {
+                let index = nearest(&series.xs, x)?;
+                Some((series.label.as_str(), series.xs[index], series.values[index]))
+            })
+            .collect()
     }
 
     /// The x range this chart's live series span, for sharing a domain
@@ -298,10 +362,18 @@ impl ChartData {
         for &boundary in &self.boundaries {
             plot = plot.layer(Rule::v(boundary));
         }
-        if let Some((min, max)) = domain
+        // The zoom window wins over the panels' shared full domain.
+        if let Some((from, to)) = self.x_window {
+            plot = plot.x_domain(from, to);
+        } else if let Some((min, max)) = domain
             && min < max
         {
             plot = plot.x_domain(min, max);
+        }
+        if let Some((min, max)) = self.y_window
+            && (!self.log_y || min > 0.0)
+        {
+            plot = plot.y_domain(min, max);
         }
         if self.time_x {
             plot = plot.x_scale(Scale::Time);
@@ -311,6 +383,23 @@ impl ChartData {
         }
         plot.title(title)
     }
+}
+
+/// Index of the element of sorted `xs` nearest to `x`.
+fn nearest(xs: &[f64], x: f64) -> Option<usize> {
+    if xs.is_empty() {
+        return None;
+    }
+    let after = xs.partition_point(|&candidate| candidate < x);
+    let candidates = [after.saturating_sub(1), after.min(xs.len() - 1)];
+    candidates
+        .into_iter()
+        .min_by(|&a, &b| {
+            (xs[a] - x)
+                .abs()
+                .partial_cmp(&(xs[b] - x).abs())
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
 }
 
 /// Ridgeline data for one histogram series: sampled snapshots as lifted

@@ -563,6 +563,27 @@ fn chart_title(app: &App, tag: &str, data: &ChartData) -> String {
     if data.tokens_dropped > 0 {
         let _ = write!(title, " · {} pts outside counter", data.tokens_dropped);
     }
+    if app.scalars.x_window.is_some() {
+        title.push_str(" · zoom (0 fits)");
+    }
+    // The crosshair readout: exact values (truncated display, never
+    // rounded) for every overlaid series at the nearest point.
+    if let Some(x) = app.scalars.crosshair {
+        let readings = data.values_at(x);
+        if let Some((_, exact_x, _)) = readings.first() {
+            let _ = write!(title, " ┊ @{}", crate::table::fmt_sig(*exact_x, 6));
+            for (label, _, value) in readings.iter().take(3) {
+                if readings.len() == 1 {
+                    let _ = write!(title, " = {}", crate::table::fmt_sig(*value, 6));
+                } else {
+                    let _ = write!(title, "  {} {}", label, crate::table::fmt_sig(*value, 6));
+                }
+            }
+            if readings.len() > 3 {
+                let _ = write!(title, "  +{}", readings.len() - 3);
+            }
+        }
+    }
     title
 }
 
@@ -614,11 +635,13 @@ fn hints(view: View) -> &'static [(&'static str, &'static str)] {
         ],
         View::Scalars => &[
             ("j/k", "tag"),
+            ("←→", "scan"),
+            ("+/-", "zoom"),
+            ("[]", "pan"),
             ("s/S", "smooth"),
             ("L", "log"),
             ("x", "axis"),
             ("v", "ghosts"),
-            ("e", "export"),
             ("?", "help"),
         ],
         View::Compare => &[
@@ -708,6 +731,8 @@ fn draw_help(frame: &mut Frame, area: Rect) {
         ("j k g G", "move · space picks runs for overlay · Enter opens"),
         ("s / S", "runs: sort column, reverse · scalars: smoothing -/+"),
         ("L · x · v", "log-y · x axis: step, wall, relative, tokens · ghosts"),
+        ("← →", "crosshair point by point, with exact values in the title"),
+        ("+ - [ ] 0", "zoom around the crosshair · pan · fit everything"),
     ];
     let mut lines = vec![Line::raw("")];
     for (key, what) in KEYS {
@@ -995,6 +1020,87 @@ mod tests {
         let hint = empty_hint(&app);
         assert!(hint.contains("runs filter"), "{hint}");
         assert!(hint.contains("working set"), "{hint}");
+    }
+
+    #[test]
+    fn crosshair_steps_points_and_reads_exact_values() {
+        use crossterm::event::{KeyCode, KeyEvent};
+        let (mut app, _guard) = test_app("crosshair");
+        app.view = View::Scalars;
+        app.scalars.cursor = Some("train/loss".to_owned());
+        app.ensure_materialized().unwrap();
+
+        // First → lands on the newest point of the first series (adam,
+        // steps 0..=9); two ← steps walk back to 7.
+        app.update(KeyEvent::from(KeyCode::Right));
+        assert_eq!(app.scalars.crosshair, Some(9.0));
+        app.update(KeyEvent::from(KeyCode::Left));
+        app.update(KeyEvent::from(KeyCode::Left));
+        assert_eq!(app.scalars.crosshair, Some(7.0));
+
+        // The readout carries every overlaid series' exact value there.
+        let chart = app.scalars_chart().unwrap();
+        let readings = chart.values_at(7.0);
+        assert_eq!(readings.len(), 2);
+        assert_eq!(readings[0].2, 1.0, "adam: 8/(7+1)");
+        assert_eq!(readings[1].2, 2.0, "sgd: 9-7");
+        // And the title mentions the position.
+        let title = chart_title(&app, "train/loss", &chart);
+        assert!(title.contains("@7"), "{title}");
+    }
+
+    #[test]
+    fn zoom_pan_and_reset() {
+        use crossterm::event::{KeyCode, KeyEvent};
+        let (mut app, _guard) = test_app("zoom");
+        app.view = View::Scalars;
+        app.scalars.cursor = Some("train/loss".to_owned());
+        app.ensure_materialized().unwrap();
+
+        // Zoom in around the center of the full 0..=9 extent.
+        app.update(KeyEvent::from(KeyCode::Char('+')));
+        let (from, to) = app.scalars.x_window.unwrap();
+        assert!((to - from - 6.0).abs() < 1e-9, "width 9/1.5, got {from}..{to}");
+        // Pan right, clamped to the extent.
+        for _ in 0..10 {
+            app.update(KeyEvent::from(KeyCode::Char(']')));
+        }
+        let (from, to) = app.scalars.x_window.unwrap();
+        assert_eq!(to, 9.0);
+        assert!((from - 3.0).abs() < 1e-9);
+        // Zoom out far enough and the window clears to full extent.
+        app.update(KeyEvent::from(KeyCode::Char('-')));
+        app.update(KeyEvent::from(KeyCode::Char('-')));
+        assert_eq!(app.scalars.x_window, None);
+
+        // The window resets when the axis's units change.
+        app.update(KeyEvent::from(KeyCode::Char('+')));
+        assert!(app.scalars.x_window.is_some());
+        app.update(KeyEvent::from(KeyCode::Char('x')));
+        assert_eq!(app.scalars.x_window, None);
+        assert_eq!(app.scalars.crosshair, None);
+    }
+
+    #[test]
+    fn crosshair_walks_the_window_along() {
+        use crossterm::event::{KeyCode, KeyEvent};
+        let (mut app, _guard) = test_app("crosshair-pan");
+        app.view = View::Scalars;
+        app.scalars.cursor = Some("train/loss".to_owned());
+        app.ensure_materialized().unwrap();
+        // Crosshair at the newest point, then zoom in tight around it.
+        app.update(KeyEvent::from(KeyCode::Right));
+        app.update(KeyEvent::from(KeyCode::Char('+')));
+        app.update(KeyEvent::from(KeyCode::Char('+')));
+        let (from, _) = app.scalars.x_window.unwrap();
+        assert!(from > 0.0);
+        // Walking left past the edge drags the window with it.
+        for _ in 0..9 {
+            app.update(KeyEvent::from(KeyCode::Left));
+        }
+        assert_eq!(app.scalars.crosshair, Some(0.0));
+        let (from, _) = app.scalars.x_window.unwrap();
+        assert_eq!(from, 0.0);
     }
 
     #[test]

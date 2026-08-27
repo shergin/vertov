@@ -373,6 +373,8 @@ fn chart_options(args: &Args) -> ChartOptions {
         log_y: false,
         show_ghosts: args.show_ghosts,
         tokens_tag: args.tokens_tag.clone(),
+        x_window: None,
+        crosshair: None,
     }
 }
 
