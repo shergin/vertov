@@ -63,7 +63,10 @@ impl PixelPanel {
     }
 }
 
-pub fn draw(frame: &mut Frame, app: &App) -> Vec<PixelPanel> {
+/// Draws one frame. `blank_panels` is the layout-change special: pixel
+/// panel rects are painted with real spaces (cleared) instead of
+/// skip-reserved, giving a following transparent image fresh ground.
+pub fn draw(frame: &mut Frame, app: &App, blank_panels: bool) -> Vec<PixelPanel> {
     let [header, body, status] = Layout::vertical([
         Constraint::Length(1),
         Constraint::Fill(1),
@@ -76,13 +79,13 @@ pub fn draw(frame: &mut Frame, app: &App) -> Vec<PixelPanel> {
             draw_runs(frame, app, body);
             Vec::new()
         }
-        View::Scalars => draw_scalars(frame, app, body),
-        View::Compare => draw_compare(frame, app, body),
+        View::Scalars => draw_scalars(frame, app, body, blank_panels),
+        View::Compare => draw_compare(frame, app, body, blank_panels),
         View::Hparams => {
             draw_hparams(frame, app, body);
             Vec::new()
         }
-        View::Distributions => draw_distributions(frame, app, body),
+        View::Distributions => draw_distributions(frame, app, body, blank_panels),
     };
     draw_status(frame, app, status);
     if app.help {
@@ -270,7 +273,7 @@ fn panel_block(title: &str, focus: bool) -> Block<'static> {
     }
 }
 
-fn draw_scalars(frame: &mut Frame, app: &App, area: Rect) -> Vec<PixelPanel> {
+fn draw_scalars(frame: &mut Frame, app: &App, area: Rect, blank: bool) -> Vec<PixelPanel> {
     let [left, right] =
         Layout::horizontal([Constraint::Length(28), Constraint::Fill(1)]).areas(area);
 
@@ -305,7 +308,7 @@ fn draw_scalars(frame: &mut Frame, app: &App, area: Rect) -> Vec<PixelPanel> {
             // panel back for post-frame emission — unless the help overlay
             // needs to paint over this area with ordinary cells.
             if app.graphics.is_some() && !app.help {
-                reserve(right, frame.buffer_mut());
+                reserve(right, frame.buffer_mut(), blank);
                 return vec![PixelPanel::Chart {
                     area: right,
                     data,
@@ -329,7 +332,7 @@ fn draw_scalars(frame: &mut Frame, app: &App, area: Rect) -> Vec<PixelPanel> {
 
 /// Small multiples: one panel per visible tag, scoped runs overlaid, x
 /// domain shared across every panel.
-fn draw_compare(frame: &mut Frame, app: &App, area: Rect) -> Vec<PixelPanel> {
+fn draw_compare(frame: &mut Frame, app: &App, area: Rect, blank: bool) -> Vec<PixelPanel> {
     let (tags, runs) = app.compare_scope();
     if tags.is_empty() {
         frame.render_widget(
@@ -379,7 +382,7 @@ fn draw_compare(frame: &mut Frame, app: &App, area: Rect) -> Vec<PixelPanel> {
             let _ = write!(title, " (+{cut} more)");
         }
         if pixels {
-            reserve(cell, frame.buffer_mut());
+            reserve(cell, frame.buffer_mut(), blank);
             out.push(PixelPanel::Chart {
                 area: cell,
                 data,
@@ -456,7 +459,7 @@ fn draw_hparams(frame: &mut Frame, app: &App, area: Rect) {
 }
 
 /// Histogram series as a ridgeline over steps.
-fn draw_distributions(frame: &mut Frame, app: &App, area: Rect) -> Vec<PixelPanel> {
+fn draw_distributions(frame: &mut Frame, app: &App, area: Rect, blank: bool) -> Vec<PixelPanel> {
     let [left, right] =
         Layout::horizontal([Constraint::Length(28), Constraint::Fill(1)]).areas(area);
 
@@ -500,7 +503,7 @@ fn draw_distributions(frame: &mut Frame, app: &App, area: Rect) -> Vec<PixelPane
     match built {
         Some((data, title)) => {
             if app.graphics.is_some() && !app.help {
-                reserve(right, frame.buffer_mut());
+                reserve(right, frame.buffer_mut(), blank);
                 return vec![PixelPanel::Dist {
                     area: right,
                     data,
@@ -521,13 +524,18 @@ fn draw_distributions(frame: &mut Frame, app: &App, area: Rect) -> Vec<PixelPane
 }
 
 /// Fills `area` with skip-flagged cells so the frame diff never paints over
-/// the image region (§5.6: reserve, don't render).
-fn reserve(area: Rect, buffer: &mut ratatui::buffer::Buffer) {
+/// the image region (§5.6: reserve, don't render). In `blank` mode the
+/// cells are ordinary spaces instead — drawn for real, clearing whatever a
+/// previous view left there before a transparent image lands on top.
+fn reserve(area: Rect, buffer: &mut ratatui::buffer::Buffer, blank: bool) {
     for y in area.top()..area.bottom() {
         for x in area.left()..area.right() {
             if let Some(cell) = buffer.cell_mut((x, y)) {
+                cell.reset();
                 cell.set_symbol(" ");
-                cell.set_diff_option(ratatui::buffer::CellDiffOption::Skip);
+                if !blank {
+                    cell.set_diff_option(ratatui::buffer::CellDiffOption::Skip);
+                }
             }
         }
     }
@@ -831,7 +839,7 @@ mod tests {
         let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
         terminal
             .draw(|frame| {
-                draw(frame, app);
+                draw(frame, app, false);
             })
             .unwrap();
         let buffer = terminal.backend().buffer();
@@ -1136,7 +1144,7 @@ mod tests {
 
         let mut terminal = Terminal::new(TestBackend::new(72, 14)).unwrap();
         let mut panels = Vec::new();
-        terminal.draw(|frame| panels = draw(frame, &app)).unwrap();
+        terminal.draw(|frame| panels = draw(frame, &app, false)).unwrap();
         assert_eq!(panels.len(), 1);
         let panel = &panels[0];
         let area = panel.area();
@@ -1170,7 +1178,7 @@ mod tests {
         // Help overlay wins over the image: no panels while it is open.
         app.help = true;
         let mut panels = vec![];
-        terminal.draw(|frame| panels = draw(frame, &app)).unwrap();
+        terminal.draw(|frame| panels = draw(frame, &app, false)).unwrap();
         assert!(panels.is_empty());
     }
 

@@ -54,10 +54,31 @@ fn event_loop(
     // when nothing changed, the previous transmission stays on screen.
     let mut emit_needed = true;
     let mut image_on_screen = false;
+    // The panel rects of the previous frame, to detect layout changes.
+    let mut previous_areas: Vec<ratatui::layout::Rect> = Vec::new();
     loop {
         app.ensure_materialized()?;
         let mut panels = Vec::new();
-        terminal.draw(|frame| panels = view::draw(frame, app))?;
+        terminal.draw(|frame| panels = view::draw(frame, app, false))?;
+
+        // Fresh ground for transparent images: cells under a skip-reserved
+        // rect survive ratatui's diff untouched, so whatever view drew
+        // there before would show through the image's alpha. Once per
+        // layout change, draw a blanking frame — the panel rects painted
+        // with real spaces instead of skip cells — so the old content is
+        // physically cleared. (No `Terminal::clear`: it round-trips a
+        // cursor-position query, which hangs headless terminals and races
+        // the raw-mode event reader.)
+        let areas: Vec<ratatui::layout::Rect> = panels.iter().map(view::PixelPanel::area).collect();
+        if !areas.is_empty() && areas != previous_areas {
+            if image_on_screen {
+                delete_kitty_images(app)?;
+                image_on_screen = false;
+            }
+            terminal.draw(|frame| panels = view::draw(frame, app, true))?;
+            emit_needed = true;
+        }
+        previous_areas = areas;
 
         if panels.is_empty() {
             // Left the charts (view switch, help overlay): cell content
