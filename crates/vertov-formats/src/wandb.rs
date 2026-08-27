@@ -161,7 +161,18 @@ pub fn parse_record(payload: &[u8]) -> Option<WandbRecord> {
     while let Some((field, value)) = reader.next()? {
         match field {
             2 => return parse_history(value.bytes()?),
-            5 => return parse_config(value.bytes()?),
+            5 => return Some(WandbRecord::Config(parse_config(value.bytes()?)?)),
+            // RunRecord: the initial config rides inside it (field 4).
+            17 => {
+                let mut updates = Vec::new();
+                let mut inner = Wire::new(value.bytes()?);
+                while let Some((field, value)) = inner.next()? {
+                    if field == 4 {
+                        updates.extend(parse_config(value.bytes()?)?);
+                    }
+                }
+                return Some(WandbRecord::Config(updates));
+            }
             18 => return Some(WandbRecord::Exit),
             _ => {}
         }
@@ -217,7 +228,7 @@ fn parse_history(buf: &[u8]) -> Option<WandbRecord> {
     })
 }
 
-fn parse_config(buf: &[u8]) -> Option<WandbRecord> {
+fn parse_config(buf: &[u8]) -> Option<Vec<(String, ParamValue)>> {
     let mut updates = Vec::new();
     let mut reader = Wire::new(buf);
     while let Some((field, value)) = reader.next()? {
@@ -232,7 +243,7 @@ fn parse_config(buf: &[u8]) -> Option<WandbRecord> {
             }
         }
     }
-    Some(WandbRecord::Config(updates))
+    Some(updates)
 }
 
 /// HistoryItem / ConfigItem: key = 1, nested_key = 2, value_json = 16.
