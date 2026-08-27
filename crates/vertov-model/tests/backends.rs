@@ -351,6 +351,37 @@ fn wandb_newer_version_is_a_dead_file() {
 }
 
 #[test]
+fn real_wandb_fixture_parses() {
+    let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures");
+    let mut project = Project::new(fixtures.join("wandb"));
+    project.refresh().unwrap();
+
+    assert_eq!(project.runs.len(), 1);
+    let name = project.runs.keys().next().unwrap().clone();
+    let run = &project.runs[&name];
+    assert_eq!(run.backend, Backend::Wandb);
+    assert_eq!(run.finished, Some(true), "the exit record marks a clean end");
+    assert_eq!(run.hparams["lr"], vertov_model::HparamValue::F64(0.003));
+    assert_eq!(
+        run.hparams["optimizer"],
+        vertov_model::HparamValue::String("adam".into())
+    );
+    assert_eq!(run.hparams["amsgrad"], vertov_model::HparamValue::Bool(true));
+    assert_eq!(run.series["train/accuracy"].summary.count(), 10);
+
+    let points = project.materialize(&name, "train/loss").unwrap().unwrap();
+    assert_eq!(points.steps, (0..10).collect::<Vec<i64>>());
+    for (index, &value) in points.values.iter().enumerate() {
+        let expected = 5.0 * (-0.35 * index as f64).exp() + 0.2;
+        assert!(
+            (value - expected).abs() < 1e-12,
+            "step {index}: {value} vs {expected}"
+        );
+    }
+    assert!(project.dead_files == 0 && project.dropped_records == 0);
+}
+
+#[test]
 fn vanished_dvclive_run_is_dropped() {
     let logdir = Logdir::new("dvclive-vanish");
     logdir.write("run/dvclive/plots/metrics/loss.tsv", "step\tloss\n0\t1.0\n");

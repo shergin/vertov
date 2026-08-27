@@ -1469,6 +1469,13 @@ fn discover(root: &Path) -> io::Result<Discovery> {
                 continue;
             }
             if path.is_dir() {
+                // Directory symlinks are skipped: they alias runs already
+                // found by their real path (wandb's `latest-run`) and are
+                // the vector for walk loops. Real loop-tolerant following
+                // can come later; aliasing bugs cannot.
+                if entry.file_type().is_ok_and(|kind| kind.is_symlink()) {
+                    continue;
+                }
                 if name == "dvclive"
                     && (path.join("metrics.json").is_file() || path.join("plots").is_dir())
                 {
