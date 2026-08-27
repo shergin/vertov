@@ -62,15 +62,18 @@ fn event_loop(
         terminal.draw(|frame| panels = view::draw(frame, app, false))?;
 
         // Fresh ground for transparent images: cells under a skip-reserved
-        // rect survive ratatui's diff untouched, so whatever view drew
-        // there before would show through the image's alpha. Once per
-        // layout change, draw a blanking frame — the panel rects painted
-        // with real spaces instead of skip cells — so the old content is
-        // physically cleared. (No `Terminal::clear`: it round-trips a
-        // cursor-position query, which hangs headless terminals and races
-        // the raw-mode event reader.)
+        // rect survive ratatui's diff untouched, so whatever was there —
+        // a previous view's table, or the previous emission's own chrome
+        // (tick labels, a longer title) — would show through the image's
+        // alpha or linger beside shorter text. Before every emission, draw
+        // a blanking frame: the panel rects painted with real spaces
+        // instead of skip cells, physically clearing them. (Not
+        // `Terminal::clear`: that round-trips a cursor-position query,
+        // which hangs headless terminals and races the raw-mode event
+        // reader. This becomes unnecessary once malevich's pixel block
+        // pads its rows to own its full rectangle.)
         let areas: Vec<ratatui::layout::Rect> = panels.iter().map(view::PixelPanel::area).collect();
-        if !areas.is_empty() && areas != previous_areas {
+        if !areas.is_empty() && (areas != previous_areas || emit_needed) {
             if image_on_screen {
                 delete_kitty_images(app)?;
                 image_on_screen = false;
