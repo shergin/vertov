@@ -9,6 +9,7 @@ description = "Unified data model for vertov: catalog, exact summaries, restart 
 
 [dependencies]
 tfevents = { path = "../tfevents", version = "0.1" }
+vertov-formats = { path = "../vertov-formats", version = "0.1" }
 
 [dev-dependencies]
 criterion = "0.5"

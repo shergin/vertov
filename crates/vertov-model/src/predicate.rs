@@ -394,6 +394,7 @@ mod tests {
             },
         );
         Run {
+            backend: crate::project::Backend::Tfevents,
             dir: PathBuf::new(),
             hparams,
             series,

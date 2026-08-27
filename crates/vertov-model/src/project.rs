@@ -34,10 +34,37 @@ pub enum RunStatus {
     Unknown,
 }
 
-/// One run: a directory containing at least one events file, named by its
-/// path relative to the scanned root (`.` for the root itself).
+/// Which format a run's data comes from. The catalog above this line is
+/// backend-blind: every backend normalizes into the same series, summaries,
+/// and preemption semantics.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[non_exhaustive]
+pub enum Backend {
+    /// TensorBoard event files.
+    Tfevents,
+    /// dvclive: tailable TSVs under `dvclive/plots/metrics/`.
+    Dvclive,
+    /// The MLflow file store: `mlruns/<exp>/<run>/metrics/*`.
+    Mlflow,
+}
+
+impl Backend {
+    /// The lowercase label shown in tables.
+    pub fn label(self) -> &'static str {
+        match self {
+            Backend::Tfevents => "tfevents",
+            Backend::Dvclive => "dvclive",
+            Backend::Mlflow => "mlflow",
+        }
+    }
+}
+
+/// One run, named by its path relative to the scanned root (`.` for the
+/// root itself) or, for MLflow, by its recorded run name.
 #[derive(Debug)]
 pub struct Run {
+    /// Where the run's data comes from.
+    pub backend: Backend,
     /// The run directory.
     pub dir: PathBuf,
     /// Typed hyperparameters from the hparams plugin, when logged.
@@ -55,8 +82,9 @@ pub struct Run {
 }
 
 impl Run {
-    fn new(dir: PathBuf) -> Run {
+    fn new(backend: Backend, dir: PathBuf) -> Run {
         Run {
+            backend,
             dir,
             hparams: BTreeMap::new(),
             series: BTreeMap::new(),
@@ -131,6 +159,24 @@ struct FileState {
     dead: bool,
 }
 
+/// Resume state for one dvclive root: per-TSV byte offsets (the files are
+/// append-only, so the offset after the last complete line is the whole
+/// resume story) and the params file's last-seen mtime.
+struct DvcliveState {
+    run: String,
+    offsets: BTreeMap<PathBuf, u64>,
+    schemas: BTreeMap<PathBuf, vertov_formats::dvclive::TsvSchema>,
+    params_mtime: Option<SystemTime>,
+}
+
+/// Resume state for one MLflow run dir: per-metric-file offsets and which
+/// (immutable) param files have been read.
+struct MlflowState {
+    run: String,
+    offsets: BTreeMap<PathBuf, u64>,
+    params_seen: std::collections::BTreeSet<PathBuf>,
+}
+
 struct MaterializedSeries {
     points: Points,
     touched: u64,
@@ -161,6 +207,10 @@ pub struct Project {
     /// Cumulative files whose framing died; their valid prefix is retained.
     pub dead_files: u64,
     files: BTreeMap<PathBuf, FileState>,
+    /// dvclive roots (the `dvclive` directory) by path.
+    dvclive: BTreeMap<PathBuf, DvcliveState>,
+    /// MLflow run directories by path.
+    mlflow: BTreeMap<PathBuf, MlflowState>,
     /// run name → tag → points, so the per-point hot path looks up with
     /// borrowed keys.
     materialized: BTreeMap<String, BTreeMap<String, MaterializedSeries>>,
@@ -184,6 +234,8 @@ impl Project {
             dropped_records: 0,
             dead_files: 0,
             files: BTreeMap::new(),
+            dvclive: BTreeMap::new(),
+            mlflow: BTreeMap::new(),
             materialized: BTreeMap::new(),
             histograms: BTreeMap::new(),
             clock: 0,
@@ -254,7 +306,11 @@ impl Project {
     /// modification times, and drop runs whose files vanished.
     pub fn refresh(&mut self) -> io::Result<RefreshReport> {
         let mut report = RefreshReport::default();
-        let discovered = discover(&self.root)?;
+        let Discovery {
+            tfevents: discovered_tfevents,
+            dvclive: discovered_dvclive,
+            mlflow: discovered_mlflow,
+        } = discover(&self.root)?;
 
         // Cache validation pre-pass: a cached file that vanished, shrank,
         // or changed without growing invalidates its whole run — the run's
@@ -263,7 +319,7 @@ impl Project {
         // live case (tfevents is append-only) and resumes from its offset.
         if !self.cached.is_empty() {
             let present: std::collections::BTreeSet<&PathBuf> =
-                discovered.iter().map(|(_, path)| path).collect();
+                discovered_tfevents.iter().map(|(_, path)| path).collect();
             let mut tainted = std::collections::BTreeSet::new();
             for (path, cached) in &self.cached {
                 let intact = present.contains(path)
@@ -282,7 +338,7 @@ impl Project {
             }
         }
 
-        for (run_name, path) in discovered {
+        for (run_name, path) in discovered_tfevents {
             if self.files.contains_key(&path) {
                 continue;
             }
@@ -299,7 +355,7 @@ impl Project {
             let dir = path.parent().unwrap_or(&self.root).to_path_buf();
             self.runs
                 .entry(run_name.clone())
-                .or_insert_with(|| Run::new(dir));
+                .or_insert_with(|| Run::new(Backend::Tfevents, dir));
             self.files.insert(
                 path,
                 FileState {
@@ -379,6 +435,85 @@ impl Project {
             self.files.retain(|_, state| state.run != run);
         }
 
+        // dvclive and MLflow: sync states with what the walk found (a
+        // vanished root drops its run), then drain each — the same
+        // append-only, offset-resumed discipline, over text lines.
+        let wanted_dvclive: BTreeMap<PathBuf, String> = discovered_dvclive.into_iter()
+            .map(|(run, path)| (path, run))
+            .collect();
+        let gone: Vec<PathBuf> = self
+            .dvclive
+            .keys()
+            .filter(|path| !wanted_dvclive.contains_key(*path))
+            .cloned()
+            .collect();
+        for path in gone {
+            if let Some(state) = self.dvclive.remove(&path) {
+                self.runs.remove(&state.run);
+                self.materialized.remove(&state.run);
+            }
+        }
+        for (path, base_name) in wanted_dvclive {
+            if !self.dvclive.contains_key(&path) {
+                let name = unique_run_name(&self.runs, base_name);
+                self.runs.entry(name.clone()).or_insert_with(|| {
+                    Run::new(
+                        Backend::Dvclive,
+                        path.parent().unwrap_or(&self.root).to_path_buf(),
+                    )
+                });
+                self.dvclive.insert(
+                    path.clone(),
+                    DvcliveState {
+                        run: name,
+                        offsets: BTreeMap::new(),
+                        schemas: BTreeMap::new(),
+                        params_mtime: None,
+                    },
+                );
+            }
+            let state = self.dvclive.get_mut(&path).expect("just ensured");
+            let run_name = state.run.clone();
+            let run = self.runs.get_mut(&run_name).expect("state has a run");
+            drain_dvclive(&path, state, run, &run_name, &mut self.materialized, &mut report)?;
+        }
+
+        let wanted_mlflow: BTreeMap<PathBuf, String> = discovered_mlflow.into_iter()
+            .map(|(run, path)| (path, run))
+            .collect();
+        let gone: Vec<PathBuf> = self
+            .mlflow
+            .keys()
+            .filter(|path| !wanted_mlflow.contains_key(*path))
+            .cloned()
+            .collect();
+        for path in gone {
+            if let Some(state) = self.mlflow.remove(&path) {
+                self.runs.remove(&state.run);
+                self.materialized.remove(&state.run);
+            }
+        }
+        for (path, base_name) in wanted_mlflow {
+            if !self.mlflow.contains_key(&path) {
+                let name = unique_run_name(&self.runs, base_name);
+                self.runs
+                    .entry(name.clone())
+                    .or_insert_with(|| Run::new(Backend::Mlflow, path.clone()));
+                self.mlflow.insert(
+                    path.clone(),
+                    MlflowState {
+                        run: name,
+                        offsets: BTreeMap::new(),
+                        params_seen: std::collections::BTreeSet::new(),
+                    },
+                );
+            }
+            let state = self.mlflow.get_mut(&path).expect("just ensured");
+            let run_name = state.run.clone();
+            let run = self.runs.get_mut(&run_name).expect("state has a run");
+            drain_mlflow(&path, state, run, &run_name, &mut self.materialized, &mut report)?;
+        }
+
         Ok(report)
     }
 
@@ -397,17 +532,83 @@ impl Project {
             entry.touched = self.clock;
             return Ok(Some(&self.materialized[run_name][tag].points));
         }
-        let Some(series) = self
-            .runs
-            .get(run_name)
-            .and_then(|run| run.series.get(tag))
-        else {
+        let Some(run) = self.runs.get(run_name) else {
+            return Ok(None);
+        };
+        let backend = run.backend;
+        let Some(series) = run.series.get(tag) else {
             return Ok(None);
         };
         if series.class != SeriesClass::Scalar {
             return Ok(None);
         }
 
+        let points = match backend {
+            Backend::Tfevents => self.materialize_tfevents(run_name, tag)?,
+            Backend::Dvclive => {
+                let Some((root, state)) = self
+                    .dvclive
+                    .iter()
+                    .find(|(_, state)| state.run == run_name)
+                else {
+                    return Ok(None);
+                };
+                let path = root
+                    .join("plots")
+                    .join("metrics")
+                    .join(format!("{tag}.tsv"));
+                let frontier = state.offsets.get(&path).copied().unwrap_or(0);
+                materialize_tsv(&path, frontier)?
+            }
+            Backend::Mlflow => {
+                let Some((root, state)) = self
+                    .mlflow
+                    .iter()
+                    .find(|(_, state)| state.run == run_name)
+                else {
+                    return Ok(None);
+                };
+                let path = root.join("metrics").join(tag);
+                let frontier = state.offsets.get(&path).copied().unwrap_or(0);
+                materialize_metric_lines(&path, frontier)?
+            }
+        };
+
+        let held: usize = self.materialized.values().map(BTreeMap::len).sum();
+        if held >= MATERIALIZE_CAP
+            && let Some(oldest) = self
+                .materialized
+                .iter()
+                .flat_map(|(run, tags)| {
+                    tags.iter()
+                        .map(move |(tag, entry)| (entry.touched, run.clone(), tag.clone()))
+                })
+                .min()
+        {
+            let (_, run, tag) = oldest;
+            if let Some(tags) = self.materialized.get_mut(&run) {
+                tags.remove(&tag);
+                if tags.is_empty() {
+                    self.materialized.remove(&run);
+                }
+            }
+        }
+        self.materialized
+            .entry(run_name.to_owned())
+            .or_default()
+            .insert(
+                tag.to_owned(),
+                MaterializedSeries {
+                    points,
+                    touched: self.clock,
+                },
+            );
+        Ok(Some(&self.materialized[run_name][tag].points))
+    }
+
+    /// The tfevents materialization body: a transient full re-read of the
+    /// run's files up to each reader's committed frontier.
+    fn materialize_tfevents(&self, run_name: &str, tag: &str) -> io::Result<Points> {
         let mut points = Points::default();
         for (path, state) in &self.files {
             if state.run != run_name {
@@ -453,37 +654,7 @@ impl Project {
                 }
             }
         }
-
-        let held: usize = self.materialized.values().map(BTreeMap::len).sum();
-        if held >= MATERIALIZE_CAP
-            && let Some(oldest) = self
-                .materialized
-                .iter()
-                .flat_map(|(run, tags)| {
-                    tags.iter()
-                        .map(move |(tag, entry)| (entry.touched, run.clone(), tag.clone()))
-                })
-                .min()
-        {
-            let (_, run, tag) = oldest;
-            if let Some(tags) = self.materialized.get_mut(&run) {
-                tags.remove(&tag);
-                if tags.is_empty() {
-                    self.materialized.remove(&run);
-                }
-            }
-        }
-        self.materialized
-            .entry(run_name.to_owned())
-            .or_default()
-            .insert(
-                tag.to_owned(),
-                MaterializedSeries {
-                    points,
-                    touched: self.clock,
-                },
-            );
-        Ok(Some(&self.materialized[run_name][tag].points))
+        Ok(points)
     }
 
     /// The materialized points of a series, if currently held.
@@ -672,6 +843,360 @@ fn ingest(
     }
 }
 
+/// Observes one scalar point from a text backend: summary, walls,
+/// preemption accounting, and the materialized append — the same path
+/// tfevents scalars take.
+fn observe_scalar(
+    run: &mut Run,
+    materialized: &mut BTreeMap<String, BTreeMap<String, MaterializedSeries>>,
+    run_name: &str,
+    tag: &str,
+    point: PointStamp,
+    report: &mut RefreshReport,
+) {
+    if point.wall != 0.0 {
+        run.first_wall = Some(run.first_wall.map_or(point.wall, |wall| wall.min(point.wall)));
+        run.last_wall = Some(run.last_wall.map_or(point.wall, |wall| wall.max(point.wall)));
+    }
+    let series = run
+        .series
+        .entry(tag.to_owned())
+        .or_insert_with(|| Series {
+            class: SeriesClass::Scalar,
+            plugin: None,
+            summary: SeriesSummary::default(),
+        });
+    if series.summary.observe(point) {
+        run.preemptions += 1;
+        report.preemptions += 1;
+    }
+    report.new_points += 1;
+    if let Some(entry) = materialized
+        .get_mut(run_name)
+        .and_then(|tags| tags.get_mut(tag))
+    {
+        entry.points.push(point);
+    }
+}
+
+/// A run name not yet taken — appends `~2`, `~3`, … on collision (two
+/// MLflow runs may share a `run_name`; different backends may share a
+/// directory).
+fn unique_run_name(runs: &BTreeMap<String, Run>, base: String) -> String {
+    if !runs.contains_key(&base) {
+        return base;
+    }
+    (2..)
+        .map(|counter| format!("{base}~{counter}"))
+        .find(|candidate| !runs.contains_key(candidate))
+        .expect("the counter is unbounded")
+}
+
+/// Reads the complete lines between `offset` and end-of-file. The trailing
+/// incomplete line — a torn write from a live logger — stays unconsumed,
+/// exactly like a torn tfevents record: a state, not an error. Returns
+/// `(text, new offset, mtime)`; `None` when the file is gone.
+fn read_new_lines(path: &Path, offset: u64) -> io::Result<Option<(String, u64, Option<SystemTime>)>> {
+    use std::io::{Read as _, Seek as _, SeekFrom};
+    let mut file = match File::open(path) {
+        Ok(file) => file,
+        Err(err) if err.kind() == ErrorKind::NotFound => return Ok(None),
+        Err(err) => return Err(err),
+    };
+    let metadata = file.metadata()?;
+    let mtime = metadata.modified().ok();
+    let len = metadata.len();
+    if len <= offset {
+        return Ok(Some((String::new(), offset, mtime)));
+    }
+    file.seek(SeekFrom::Start(offset))?;
+    let mut buf = Vec::with_capacity((len - offset) as usize);
+    file.take(len - offset).read_to_end(&mut buf)?;
+    let complete = buf
+        .iter()
+        .rposition(|&byte| byte == b'\n')
+        .map_or(0, |position| position + 1);
+    buf.truncate(complete);
+    let text = String::from_utf8_lossy(&buf).into_owned();
+    Ok(Some((text, offset + complete as u64, mtime)))
+}
+
+/// Collects the files under `base`, as `(absolute path, `/`-joined relative
+/// name)`, sorted. Shallow recursion with a depth cap.
+fn walk_files(base: &Path) -> Vec<(PathBuf, String)> {
+    let mut out = Vec::new();
+    let mut stack = vec![(base.to_path_buf(), 0usize)];
+    while let Some((dir, depth)) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+                continue;
+            };
+            if name.starts_with('.') {
+                continue;
+            }
+            if path.is_dir() {
+                if depth < 8 {
+                    stack.push((path, depth + 1));
+                }
+            } else {
+                let relative = path
+                    .strip_prefix(base)
+                    .map(|relative| {
+                        relative
+                            .to_string_lossy()
+                            .replace(std::path::MAIN_SEPARATOR, "/")
+                    })
+                    .unwrap_or_else(|_| name.to_owned());
+                out.push((path, relative));
+            }
+        }
+    }
+    out.sort();
+    out
+}
+
+fn convert_param(value: vertov_formats::ParamValue) -> HparamValue {
+    match value {
+        vertov_formats::ParamValue::Number(number) => HparamValue::F64(number),
+        vertov_formats::ParamValue::Bool(flag) => HparamValue::Bool(flag),
+        vertov_formats::ParamValue::Text(text) => HparamValue::String(text),
+    }
+}
+
+/// Materializes a dvclive TSV up to `frontier`: header defines the schema,
+/// rows become points, preemption applies on push.
+fn materialize_tsv(path: &Path, frontier: u64) -> io::Result<Points> {
+    let mut points = Points::default();
+    let text = read_prefix(path, frontier)?;
+    let mut lines = text.lines();
+    let Some(schema) = lines
+        .next()
+        .and_then(vertov_formats::dvclive::TsvSchema::from_header)
+    else {
+        return Ok(points);
+    };
+    for line in lines {
+        if let Some(row) = schema.parse_row(line) {
+            points.push(PointStamp {
+                step: row.step,
+                wall: row.wall,
+                value: row.value,
+            });
+        }
+    }
+    Ok(points)
+}
+
+/// Materializes an MLflow metric file up to `frontier`.
+fn materialize_metric_lines(path: &Path, frontier: u64) -> io::Result<Points> {
+    let mut points = Points::default();
+    for line in read_prefix(path, frontier)?.lines() {
+        if let Some(metric) = vertov_formats::mlflow::parse_metric_line(line) {
+            points.push(PointStamp {
+                step: metric.step,
+                wall: metric.wall,
+                value: metric.value,
+            });
+        }
+    }
+    Ok(points)
+}
+
+/// The first `frontier` bytes of a file as (lossy) text; empty when the
+/// frontier is zero or the file is gone.
+fn read_prefix(path: &Path, frontier: u64) -> io::Result<String> {
+    use std::io::Read as _;
+    if frontier == 0 {
+        return Ok(String::new());
+    }
+    let file = match File::open(path) {
+        Ok(file) => file,
+        Err(err) if err.kind() == ErrorKind::NotFound => return Ok(String::new()),
+        Err(err) => return Err(err),
+    };
+    let mut buf = Vec::with_capacity(frontier as usize);
+    file.take(frontier).read_to_end(&mut buf)?;
+    Ok(String::from_utf8_lossy(&buf).into_owned())
+}
+
+/// Resets a run whose backing files shrank or were replaced: the honest
+/// recovery is a full re-read this same pass.
+fn reset_run(
+    run: &mut Run,
+    run_name: &str,
+    materialized: &mut BTreeMap<String, BTreeMap<String, MaterializedSeries>>,
+) {
+    run.series.clear();
+    run.preemptions = 0;
+    run.first_wall = None;
+    run.last_wall = None;
+    materialized.remove(run_name);
+}
+
+/// One dvclive tick: params on change, then every metrics TSV drained from
+/// its committed offset.
+fn drain_dvclive(
+    root: &Path,
+    state: &mut DvcliveState,
+    run: &mut Run,
+    run_name: &str,
+    materialized: &mut BTreeMap<String, BTreeMap<String, MaterializedSeries>>,
+    report: &mut RefreshReport,
+) -> io::Result<()> {
+    let params = root.join("params.yaml");
+    if let Ok(metadata) = std::fs::metadata(&params) {
+        let mtime = metadata.modified().ok();
+        if mtime != state.params_mtime {
+            state.params_mtime = mtime;
+            if let Ok(text) = std::fs::read_to_string(&params) {
+                run.hparams = vertov_formats::dvclive::parse_params_yaml(&text)
+                    .into_iter()
+                    .map(|(key, value)| (key, convert_param(value)))
+                    .collect();
+            }
+        }
+    }
+
+    let files = walk_files(&root.join("plots").join("metrics"));
+    let shrank = files.iter().any(|(path, _)| {
+        state.offsets.get(path).is_some_and(|&offset| {
+            std::fs::metadata(path).map(|metadata| metadata.len()).unwrap_or(0) < offset
+        })
+    });
+    if shrank {
+        reset_run(run, run_name, materialized);
+        state.offsets.clear();
+        state.schemas.clear();
+    }
+
+    for (path, relative) in files {
+        let Some(tag) = relative.strip_suffix(".tsv").map(str::to_owned) else {
+            continue;
+        };
+        let offset = state.offsets.get(&path).copied().unwrap_or(0);
+        let Some((text, new_offset, mtime)) = read_new_lines(&path, offset)? else {
+            continue;
+        };
+        if let Some(mtime) = mtime {
+            run.last_write = Some(run.last_write.map_or(mtime, |known| known.max(mtime)));
+        }
+        if new_offset == offset {
+            continue;
+        }
+        let mut lines = text.lines();
+        // The first line of the file is the header; it defines the schema
+        // and is re-read whenever we start from the top.
+        let schema = if offset == 0 {
+            match lines.next().and_then(vertov_formats::dvclive::TsvSchema::from_header) {
+                Some(schema) => {
+                    state.schemas.insert(path.clone(), schema.clone());
+                    schema
+                }
+                None => {
+                    // Not a metrics TSV after all; never look again.
+                    state.offsets.insert(path, new_offset);
+                    continue;
+                }
+            }
+        } else {
+            match state.schemas.get(&path) {
+                Some(schema) => schema.clone(),
+                None => continue,
+            }
+        };
+        for line in lines {
+            match schema.parse_row(line) {
+                Some(row) => observe_scalar(
+                    run,
+                    materialized,
+                    run_name,
+                    &tag,
+                    PointStamp {
+                        step: row.step,
+                        wall: row.wall,
+                        value: row.value,
+                    },
+                    report,
+                ),
+                None => {
+                    report.dropped_records += 1;
+                }
+            }
+        }
+        state.offsets.insert(path, new_offset);
+    }
+    Ok(())
+}
+
+/// One MLflow tick: new param files once (they are immutable), then every
+/// metric file drained from its committed offset.
+fn drain_mlflow(
+    root: &Path,
+    state: &mut MlflowState,
+    run: &mut Run,
+    run_name: &str,
+    materialized: &mut BTreeMap<String, BTreeMap<String, MaterializedSeries>>,
+    report: &mut RefreshReport,
+) -> io::Result<()> {
+    for (path, relative) in walk_files(&root.join("params")) {
+        if state.params_seen.insert(path.clone())
+            && let Ok(text) = std::fs::read_to_string(&path)
+        {
+            run.hparams
+                .insert(relative, convert_param(vertov_formats::mlflow::parse_param(&text)));
+        }
+    }
+
+    let files = walk_files(&root.join("metrics"));
+    let shrank = files.iter().any(|(path, _)| {
+        state.offsets.get(path).is_some_and(|&offset| {
+            std::fs::metadata(path).map(|metadata| metadata.len()).unwrap_or(0) < offset
+        })
+    });
+    if shrank {
+        reset_run(run, run_name, materialized);
+        state.offsets.clear();
+    }
+
+    for (path, tag) in files {
+        let offset = state.offsets.get(&path).copied().unwrap_or(0);
+        let Some((text, new_offset, mtime)) = read_new_lines(&path, offset)? else {
+            continue;
+        };
+        if let Some(mtime) = mtime {
+            run.last_write = Some(run.last_write.map_or(mtime, |known| known.max(mtime)));
+        }
+        if new_offset == offset {
+            continue;
+        }
+        for line in text.lines() {
+            match vertov_formats::mlflow::parse_metric_line(line) {
+                Some(metric) => observe_scalar(
+                    run,
+                    materialized,
+                    run_name,
+                    &tag,
+                    PointStamp {
+                        step: metric.step,
+                        wall: metric.wall,
+                        value: metric.value,
+                    },
+                    report,
+                ),
+                None => {
+                    report.dropped_records += 1;
+                }
+            }
+        }
+        state.offsets.insert(path, new_offset);
+    }
+    Ok(())
+}
+
 fn classify(value: &SummaryValue) -> SeriesClass {
     if let Some(metadata) = &value.metadata {
         match metadata.plugin_name.as_str() {
@@ -701,11 +1226,26 @@ fn classify(value: &SummaryValue) -> SeriesClass {
     }
 }
 
-/// Walks `root` for tfevents files: `(run name, file path)` pairs, sorted.
-/// A run is a directory containing at least one file whose basename contains
-/// `tfevents`; its name is the directory's root-relative path.
-fn discover(root: &Path) -> io::Result<Vec<(String, PathBuf)>> {
-    let mut found = Vec::new();
+/// Everything one walk of the root found, per backend.
+#[derive(Default)]
+struct Discovery {
+    /// tfevents: `(run name, file path)`, sorted — a run is a directory
+    /// containing at least one file whose basename contains `tfevents`.
+    tfevents: Vec<(String, PathBuf)>,
+    /// dvclive: `(run name, dvclive dir)` — a directory containing a
+    /// `dvclive` child with `metrics.json` or `plots/` marks a root, named
+    /// by the *parent*'s root-relative path.
+    dvclive: Vec<(String, PathBuf)>,
+    /// MLflow: `(run name, run dir)` — a directory whose `meta.yaml`
+    /// carries a run id; named by its recorded `run_name`, falling back to
+    /// the root-relative path.
+    mlflow: Vec<(String, PathBuf)>,
+}
+
+/// Walks `root` once, classifying what it finds. Mixed roots just work:
+/// each directory declares itself independently.
+fn discover(root: &Path) -> io::Result<Discovery> {
+    let mut found = Discovery::default();
     // Depth cap in place of true symlink-loop detection; 32 levels is
     // beyond any sane logdir.
     let mut stack = vec![(root.to_path_buf(), 0usize)];
@@ -727,15 +1267,31 @@ fn discover(root: &Path) -> io::Result<Vec<(String, PathBuf)>> {
                 continue;
             }
             if path.is_dir() {
+                if name == "dvclive"
+                    && (path.join("metrics.json").is_file() || path.join("plots").is_dir())
+                {
+                    found.dvclive.push((run_name(root, &dir), path));
+                    continue;
+                }
                 if depth < 32 {
                     stack.push((path, depth + 1));
                 }
             } else if name.contains("tfevents") {
-                found.push((run_name(root, &dir), path));
+                found.tfevents.push((run_name(root, &dir), path));
+            } else if name == "meta.yaml"
+                && let Ok(text) = std::fs::read_to_string(&path)
+            {
+                let meta = vertov_formats::mlflow::parse_meta(&text);
+                if meta.run_id.is_some() {
+                    let run = meta.run_name.unwrap_or_else(|| run_name(root, &dir));
+                    found.mlflow.push((run, dir.clone()));
+                }
             }
         }
     }
-    found.sort();
+    found.tfevents.sort();
+    found.dvclive.sort();
+    found.mlflow.sort();
     Ok(found)
 }
 

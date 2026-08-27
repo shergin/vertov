@@ -1797,6 +1797,7 @@ version = "0.1.0"
 dependencies = [
  "criterion",
  "tfevents",
+ "vertov-formats",
 ]
 
 [[package]]

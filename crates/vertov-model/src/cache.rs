@@ -262,6 +262,9 @@ pub(crate) fn load(root: &Path, dir: Option<&Path>) -> Option<CachedProject> {
         runs.insert(
             name.clone(),
             Run {
+                // The cache stores tfevents state only; other backends
+                // re-read cold (their files are small text).
+                backend: crate::project::Backend::Tfevents,
                 dir,
                 hparams,
                 series: series_map,
