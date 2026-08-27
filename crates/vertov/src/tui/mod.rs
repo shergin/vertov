@@ -169,9 +169,16 @@ fn encode_pixels(panel: &view::PixelPanel, graphics: &malevich::pixel::Graphics)
         color: malevich::ColorMode::TrueColor,
         theme: malevich::Theme::DARK,
     };
-    panel
+    let block = panel
         .plot()
-        .render_pixels_at(&frame, graphics, area.x as usize)
+        .render_pixels_at(&frame, graphics, area.x as usize);
+    // Raw mode: LF moves down without returning the carriage, and a block
+    // at column 0 has no per-row column anchors (malevich keeps flush-left
+    // text escape-free for cooked-mode hosts) — its rows would staircase
+    // across the screen and scroll the alt buffer out from under ratatui.
+    // No image payload can contain a raw newline, so this touches only
+    // the row separators.
+    block.replace('\n', "\r\n")
 }
 
 /// Replaces the on-screen images with freshly encoded blocks in one
