@@ -53,29 +53,31 @@ fn event_loop(
     let mut image_on_screen = false;
     loop {
         app.ensure_materialized()?;
-        let mut panel = None;
-        terminal.draw(|frame| panel = view::draw(frame, app))?;
+        let mut panels = Vec::new();
+        terminal.draw(|frame| panels = view::draw(frame, app))?;
 
-        match &panel {
-            Some(panel) => {
-                if let Some(graphics) = &app.graphics
-                    && emit_needed
-                {
-                    emit_pixels(panel, graphics)?;
-                    emit_needed = false;
-                    image_on_screen = true;
-                }
+        if panels.is_empty() {
+            // Left the charts (view switch, help overlay): cell content
+            // repaints the area, but kitty images live on their own layer
+            // and need an explicit goodbye.
+            if image_on_screen {
+                delete_kitty_images(app)?;
+                image_on_screen = false;
+                emit_needed = true;
             }
-            None => {
-                // Left the chart (view switch, help overlay): cell content
-                // repaints the area, but kitty images live on their own
-                // layer and need an explicit goodbye.
-                if image_on_screen {
-                    delete_kitty_images(app)?;
-                    image_on_screen = false;
-                    emit_needed = true;
-                }
+        } else if let Some(graphics) = &app.graphics
+            && emit_needed
+        {
+            // Panel count can shrink (compare grid resize): clear kitty
+            // placements before re-emitting so orphans never linger.
+            if image_on_screen {
+                delete_kitty_images(app)?;
             }
+            for panel in &panels {
+                emit_pixels(panel, graphics)?;
+            }
+            emit_needed = false;
+            image_on_screen = true;
         }
 
         if event::poll(Duration::from_millis(200))? {
@@ -109,19 +111,19 @@ fn event_loop(
 fn emit_pixels(panel: &view::PixelPanel, graphics: &malevich::pixel::Graphics) -> std::io::Result<()> {
     use crossterm::{cursor::MoveTo, style::Print};
     use std::io::Write as _;
+    let area = panel.area();
     let frame = malevich::Frame {
-        width: panel.area.width as usize,
-        height: panel.area.height as usize,
+        width: area.width as usize,
+        height: area.height as usize,
         charset: malevich::Charset::Quadrants,
         color: malevich::ColorMode::TrueColor,
         theme: malevich::Theme::DARK,
     };
     let block = panel
-        .data
-        .plot(&panel.title)
-        .render_pixels_at(&frame, graphics, panel.area.x as usize);
+        .plot()
+        .render_pixels_at(&frame, graphics, area.x as usize);
     let mut out = std::io::stdout();
-    crossterm::queue!(out, MoveTo(panel.area.x, panel.area.y), Print(block))?;
+    crossterm::queue!(out, MoveTo(area.x, area.y), Print(block))?;
     out.flush()
 }
 
@@ -143,7 +145,7 @@ fn final_frame(app: &App) -> String {
     use crate::chart::ChartData;
     use crate::table::{Cell, Format, Table, fmt_duration};
     match app.view {
-        app::View::Runs => {
+        app::View::Runs | app::View::Hparams | app::View::Distributions => {
             let rows = app
                 .run_rows()
                 .into_iter()
@@ -168,7 +170,7 @@ fn final_frame(app: &App) -> String {
             }
             .render(Format::Text)
         }
-        app::View::Scalars => match app.current_tag() {
+        app::View::Scalars | app::View::Compare => match app.current_tag() {
             Some(tag) => {
                 let scope = app.scoped_runs();
                 let data = ChartData::for_tag(&app.project, &scope, &tag, &app.chart_options());

@@ -51,6 +51,7 @@ Chart options (show, tail):
                     ('lr > 1e-3 and status == active'), or — when the text
                     is not a predicate — a substring of the run name.
                     Also accepted by ls and export.
+  --ghosts          Draw preempted (pre-restart) tails as faded lines.
       --width <N>   Frame width in cells (default: detected).
       --height <N>  Frame height in cells (default: detected).
 
@@ -86,6 +87,7 @@ struct Args {
     height: Option<usize>,
     no_cache: bool,
     no_pixels: bool,
+    show_ghosts: bool,
 }
 
 enum Command {
@@ -142,6 +144,7 @@ fn parse_args() -> Result<Option<Args>, lexopt::Error> {
     let mut height = None;
     let mut no_cache = false;
     let mut no_pixels = false;
+    let mut show_ghosts = false;
 
     let mut parser = lexopt::Parser::from_env();
     while let Some(arg) = parser.next()? {
@@ -183,6 +186,7 @@ fn parse_args() -> Result<Option<Args>, lexopt::Error> {
             Long("width") => width = Some(parser.value()?.parse()?),
             Long("height") => height = Some(parser.value()?.parse()?),
             Long("no-cache") => no_cache = true,
+            Long("ghosts") => show_ghosts = true,
             Long("pixels") => {
                 no_pixels = match parser.value()?.string()?.as_str() {
                     "auto" => false,
@@ -243,6 +247,7 @@ fn parse_args() -> Result<Option<Args>, lexopt::Error> {
         height,
         no_cache,
         no_pixels,
+        show_ghosts,
     }))
 }
 
@@ -301,6 +306,7 @@ fn chart_options(args: &Args) -> ChartOptions {
         smooth: args.smooth,
         runs_filter: args.runs_filter.clone(),
         log_y: false,
+        show_ghosts: args.show_ghosts,
     }
 }
 

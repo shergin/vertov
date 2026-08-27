@@ -8,34 +8,79 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Row, Table};
 
-use crate::chart::ChartData;
+use crate::chart::{ChartData, DistData};
 use crate::table::fmt_duration;
 use crate::tui::app::{App, View};
 
 /// A chart panel reserved for pixel graphics this frame: the cell diff left
 /// its rect untouched (skip cells), and the caller emits this after the
 /// frame flushes.
-pub struct PixelPanel {
-    pub area: Rect,
-    pub data: ChartData,
-    pub title: String,
+pub enum PixelPanel {
+    Chart {
+        area: Rect,
+        data: ChartData,
+        title: String,
+        /// Shared x domain, for compare panels.
+        domain: Option<(f64, f64)>,
+        /// Legend-free rendering (compare panels).
+        bare: bool,
+    },
+    Dist {
+        area: Rect,
+        data: DistData,
+        title: String,
+    },
 }
 
-pub fn draw(frame: &mut Frame, app: &App) -> Option<PixelPanel> {
+impl PixelPanel {
+    pub fn area(&self) -> Rect {
+        match self {
+            PixelPanel::Chart { area, .. } | PixelPanel::Dist { area, .. } => *area,
+        }
+    }
+
+    /// The panel's plot, ready for pixel rendering.
+    pub fn plot(&self) -> malevich::Plot<'_> {
+        match self {
+            PixelPanel::Chart {
+                data,
+                title,
+                domain,
+                bare,
+                ..
+            } => {
+                if *bare {
+                    data.compare_plot(title, *domain)
+                } else {
+                    data.plot(title)
+                }
+            }
+            PixelPanel::Dist { data, title, .. } => data.plot(title),
+        }
+    }
+}
+
+pub fn draw(frame: &mut Frame, app: &App) -> Vec<PixelPanel> {
     let [body, status] =
         Layout::vertical([Constraint::Fill(1), Constraint::Length(1)]).areas(frame.area());
-    let panel = match app.view {
+    let panels = match app.view {
         View::Runs => {
             draw_runs(frame, app, body);
-            None
+            Vec::new()
         }
         View::Scalars => draw_scalars(frame, app, body),
+        View::Compare => draw_compare(frame, app, body),
+        View::Hparams => {
+            draw_hparams(frame, app, body);
+            Vec::new()
+        }
+        View::Distributions => draw_distributions(frame, app, body),
     };
     draw_status(frame, app, status);
     if app.help {
         draw_help(frame, frame.area());
     }
-    panel
+    panels
 }
 
 fn draw_runs(frame: &mut Frame, app: &App, area: Rect) {
@@ -90,7 +135,11 @@ fn draw_runs(frame: &mut Frame, app: &App, area: Rect) {
     ])
     .style(Style::default().add_modifier(Modifier::BOLD));
 
-    let title = panel_title("runs", &app.runs.filter, app.runs.editing_filter);
+    let mut title = panel_title("runs", &app.runs.filter, app.runs.editing_filter);
+    if let Some(kept) = &app.working_set {
+        use std::fmt::Write as _;
+        let _ = write!(title, " · keeping {} (U resets)", kept.len());
+    }
     let table = Table::new(
         table_rows,
         [
@@ -108,7 +157,7 @@ fn draw_runs(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(table, area);
 }
 
-fn draw_scalars(frame: &mut Frame, app: &App, area: Rect) -> Option<PixelPanel> {
+fn draw_scalars(frame: &mut Frame, app: &App, area: Rect) -> Vec<PixelPanel> {
     let [left, right] =
         Layout::horizontal([Constraint::Length(28), Constraint::Fill(1)]).areas(area);
 
@@ -141,11 +190,13 @@ fn draw_scalars(frame: &mut Frame, app: &App, area: Rect) -> Option<PixelPanel> 
             // needs to paint over this area with ordinary cells.
             if app.graphics.is_some() && !app.help {
                 reserve(right, frame.buffer_mut());
-                return Some(PixelPanel {
+                return vec![PixelPanel::Chart {
                     area: right,
                     data,
                     title,
-                });
+                    domain: None,
+                    bare: false,
+                }];
             }
             frame.render_widget(data.plot(&title).widget(), right);
         }
@@ -157,7 +208,185 @@ fn draw_scalars(frame: &mut Frame, app: &App, area: Rect) -> Option<PixelPanel> 
             );
         }
     }
-    None
+    Vec::new()
+}
+
+/// Small multiples: one panel per visible tag, scoped runs overlaid, x
+/// domain shared across every panel.
+fn draw_compare(frame: &mut Frame, app: &App, area: Rect) -> Vec<PixelPanel> {
+    let (tags, runs) = app.compare_scope();
+    if tags.is_empty() {
+        frame.render_widget(
+            Paragraph::new("no scalar tags match").block(Block::default().borders(Borders::ALL)),
+            area,
+        );
+        return Vec::new();
+    }
+    // Panels get at least ~24×8 cells; the grid shrinks to what fits.
+    let columns = usize::from(area.width / 24).clamp(1, 3);
+    let max_rows = usize::from(area.height / 8).max(1);
+    let shown = tags.len().min(columns * max_rows);
+    let rows = shown.div_ceil(columns);
+
+    let options = app.chart_options();
+    let panels: Vec<(String, ChartData)> = tags[..shown]
+        .iter()
+        .map(|tag| {
+            let data = ChartData::for_tag(&app.project, &runs, tag, &options);
+            (tag.clone(), data)
+        })
+        .collect();
+    let domain = panels
+        .iter()
+        .filter_map(|(_, data)| data.x_extent())
+        .reduce(|(min_a, max_a), (min_b, max_b)| (min_a.min(min_b), max_a.max(max_b)));
+
+    let row_areas = Layout::vertical(vec![Constraint::Fill(1); rows]).split(area);
+    let mut cells = Vec::new();
+    for row_area in row_areas.iter() {
+        cells.extend(
+            Layout::horizontal(vec![Constraint::Fill(1); columns])
+                .split(*row_area)
+                .iter()
+                .copied(),
+        );
+    }
+
+    let pixels = app.graphics.is_some() && !app.help;
+    let mut out = Vec::new();
+    for ((tag, data), cell) in panels.into_iter().zip(cells) {
+        let mut title = tag;
+        if out.is_empty()
+            && let Some(cut) = tags.len().checked_sub(shown).filter(|&cut| cut > 0)
+        {
+            use std::fmt::Write as _;
+            let _ = write!(title, " (+{cut} more)");
+        }
+        if pixels {
+            reserve(cell, frame.buffer_mut());
+            out.push(PixelPanel::Chart {
+                area: cell,
+                data,
+                title,
+                domain,
+                bare: true,
+            });
+        } else {
+            frame.render_widget(data.compare_plot(&title, domain).widget(), cell);
+        }
+    }
+    out
+}
+
+/// The flat runs × (params + metrics) table with keep/exclude refinement.
+fn draw_hparams(frame: &mut Frame, app: &App, area: Rect) {
+    let (columns, rows) = app.hparam_table();
+    let cursor = app.runs.cursor.as_ref().and_then(|cursor| {
+        rows.iter()
+            .position(|row| row.first().map(|cell| cell.text()) == Some(cursor.clone()))
+    });
+    let table_rows: Vec<Row> = rows
+        .iter()
+        .enumerate()
+        .map(|(index, row)| {
+            let mut cells: Vec<String> = row.iter().map(|cell| cell.text()).collect();
+            if let Some(first) = cells.first_mut() {
+                let marker = if app.runs.selected.contains(&first.clone()) {
+                    "▸"
+                } else {
+                    " "
+                };
+                *first = format!("{marker}{first}");
+            }
+            let style = if Some(index) == cursor {
+                Style::default().add_modifier(Modifier::REVERSED)
+            } else {
+                Style::default()
+            };
+            Row::new(cells).style(style)
+        })
+        .collect();
+    let header = Row::new(columns.clone()).style(Style::default().add_modifier(Modifier::BOLD));
+    let mut constraints = vec![Constraint::Fill(2)];
+    constraints.extend(
+        columns
+            .iter()
+            .skip(1)
+            .map(|column| Constraint::Length((column.len() as u16).clamp(8, 22))),
+    );
+    let mut title = panel_title("hparams", &app.runs.filter, app.runs.editing_filter);
+    if let Some(kept) = &app.working_set {
+        use std::fmt::Write as _;
+        let _ = write!(title, " · keeping {} (U resets)", kept.len());
+    }
+    frame.render_widget(
+        Table::new(table_rows, constraints)
+            .header(header)
+            .block(Block::default().borders(Borders::ALL).title(title)),
+        area,
+    );
+}
+
+/// Histogram series as a ridgeline over steps.
+fn draw_distributions(frame: &mut Frame, app: &App, area: Rect) -> Vec<PixelPanel> {
+    let [left, right] =
+        Layout::horizontal([Constraint::Length(28), Constraint::Fill(1)]).areas(area);
+
+    let tags = app.histogram_tags();
+    let target = app.distribution_target();
+    let current_tag = target.as_ref().map(|(_, tag)| tag.clone());
+    let items: Vec<ListItem> = tags
+        .iter()
+        .map(|tag| {
+            let style = if Some(tag) == current_tag.as_ref() {
+                Style::default().add_modifier(Modifier::REVERSED)
+            } else {
+                Style::default()
+            };
+            ListItem::new(tag.clone()).style(style)
+        })
+        .collect();
+    let title = panel_title(
+        "histograms",
+        &app.distributions.filter,
+        app.distributions.editing_filter,
+    );
+    frame.render_widget(
+        List::new(items).block(Block::default().borders(Borders::ALL).title(title)),
+        left,
+    );
+
+    let built = target.as_ref().and_then(|(run, tag)| {
+        let series = app.project.histogram_series(run, tag)?;
+        let data = DistData::build(series, 12)?;
+        let mut title = format!("{tag} · {run} · steps {}–{}", data.step_range.0, data.step_range.1);
+        if data.drawn < data.total {
+            use std::fmt::Write as _;
+            let _ = write!(title, " · {} of {} shown", data.drawn, data.total);
+        }
+        Some((data, title))
+    });
+    match built {
+        Some((data, title)) => {
+            if app.graphics.is_some() && !app.help {
+                reserve(right, frame.buffer_mut());
+                return vec![PixelPanel::Dist {
+                    area: right,
+                    data,
+                    title,
+                }];
+            }
+            frame.render_widget(data.plot(&title).widget(), right);
+        }
+        None => {
+            frame.render_widget(
+                Paragraph::new("no histogram series match")
+                    .block(Block::default().borders(Borders::ALL)),
+                right,
+            );
+        }
+    }
+    Vec::new()
 }
 
 /// Fills `area` with skip-flagged cells so the frame diff never paints over
@@ -187,6 +416,9 @@ fn chart_title(app: &App, tag: &str, data: &ChartData) -> String {
     }
     if app.scalars.log_y {
         title.push_str(" · log");
+    }
+    if app.scalars.show_ghosts {
+        title.push_str(" · ghosts");
     }
     match app.scalars.x_axis {
         crate::chart::XAxis::Step => {}
@@ -246,18 +478,21 @@ fn draw_status(frame: &mut Frame, app: &App, area: Rect) {
 
 fn draw_help(frame: &mut Frame, area: Rect) {
     let text = "\
-  q          quit
-  ?          this help (any key closes)
-  Tab 1 2    switch view: runs / scalars
-  /          filter (Esc clears, Enter keeps)
-  e          export current view as CSV, next to your shell
-  p          pause polling      r  refresh now
+  q             quit
+  ?             this help (any key closes)
+  Tab 1-5       views: runs / scalars / compare / hparams / distributions
+  /             filter (Esc clears, Enter keeps)
+  K X U         keep / exclude selection in the working set · U resets
+  e             export current view as CSV, next to your shell
+  p             pause polling      r  refresh now
 
-  runs:      j/k move · space select for overlay · Enter open scalars
-             s sort column · S reverse
-             / takes a predicate too: lr > 1e-3 and status == active
-  scalars:   j/k move tag (fuzzy /) · s/S smoothing -/+ · L log-y
-             x cycle x axis: step/wall/relative · Esc back to runs";
+  runs+hparams: j/k move · space select for overlay · Enter open scalars
+                s sort column · S reverse
+                / takes a predicate too: lr > 1e-3 and status == active
+  scalars:      j/k move tag (fuzzy /) · s/S smoothing -/+ · L log-y
+                x cycle x axis: step/wall/relative · v ghost tails
+                Esc back to runs (compare shares these keys)
+  distributions: j/k move histogram tag · Esc back to runs";
     let lines = text.lines().count() as u16 + 2;
     let width = 64.min(area.width);
     let popup = Rect {
@@ -286,7 +521,7 @@ mod tests {
     fn test_app(name: &str) -> (App, tempdir::Guard) {
         let guard = tempdir::Guard::new(name);
         let wall = |step: i64| 1.7e9 + step as f64 * 10.0;
-        let adam: Vec<Vec<u8>> = (0..10)
+        let mut adam: Vec<Vec<u8>> = (0..10)
             .flat_map(|step| {
                 [
                     scalar_event(wall(step), step, "train/loss", 8.0 / (step + 1) as f32),
@@ -294,6 +529,14 @@ mod tests {
                 ]
             })
             .collect();
+        for step in 0..3 {
+            adam.push(tfevents::writer::histogram_event(
+                wall(step),
+                step,
+                "params/w",
+                &[(-1.0, 0.0, 3.0 + step as f64), (0.0, 1.0, 5.0)],
+            ));
+        }
         guard.write("adam/events.out.tfevents.1000.host", &events_file(&adam));
         let sgd: Vec<Vec<u8>> = (0..8)
             .map(|step| scalar_event(wall(step), step, "train/loss", 9.0 - step as f32))
@@ -369,7 +612,7 @@ mod tests {
         let expected = [
             "┌runs──────────────────────────────────────────────────────────────────┐",
             "│run▲                 status series points   restarts step     duration│",
-            "│ adam                active 2      20       0        9        90s     │",
+            "│ adam                active 3      23       0        9        90s     │",
             "│▸sgd                 active 1      8        0        7        70s     │",
             "│                                                                      │",
             "│                                                                      │",
@@ -418,6 +661,71 @@ mod tests {
     }
 
     #[test]
+    fn compare_view_draws_small_multiples() {
+        let (mut app, _guard) = test_app("compare");
+        app.view = View::Compare;
+        app.ensure_materialized().unwrap();
+        let text = snapshot(&app, 80, 20).join("\n");
+        // One panel per scalar tag, titled by tag; histograms stay out.
+        assert!(text.contains("train/acc"), "{text}");
+        assert!(text.contains("train/loss"), "{text}");
+        assert!(!text.contains("params/w"), "{text}");
+    }
+
+    #[test]
+    fn hparams_view_lists_params_and_metrics() {
+        let (mut app, _guard) = test_app("hparams-view");
+        app.view = View::Hparams;
+        app.project
+            .runs
+            .get_mut("adam")
+            .unwrap()
+            .hparams
+            .insert("lr".to_owned(), vertov_model::HparamValue::F64(0.01));
+        let (columns, rows) = app.hparam_table();
+        assert_eq!(columns, vec!["run", "lr", "train/acc", "train/loss"]);
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0][1], crate::tui::app::HparamCell::Number(0.01));
+        assert_eq!(rows[1][1], crate::tui::app::HparamCell::Empty);
+        let text = snapshot(&app, 72, 8).join("\n");
+        assert!(text.contains("lr"), "{text}");
+        assert!(text.contains("adam"), "{text}");
+    }
+
+    #[test]
+    fn distributions_view_draws_ridgeline() {
+        let (mut app, _guard) = test_app("distributions");
+        app.view = View::Distributions;
+        app.ensure_materialized().unwrap();
+        let text = snapshot(&app, 78, 16).join("\n");
+        assert!(text.contains("params/w"), "tag list: {text}");
+        assert!(text.contains("steps 0–2"), "title: {text}");
+        assert!(text.contains("adam"), "run in title: {text}");
+    }
+
+    #[test]
+    fn keep_and_exclude_refine_the_working_set() {
+        use crossterm::event::{KeyCode, KeyEvent};
+        let (mut app, _guard) = test_app("working-set");
+        // Keep the cursor run.
+        app.runs.cursor = Some("sgd".to_owned());
+        app.update(KeyEvent::from(KeyCode::Char('K')));
+        assert_eq!(
+            app.run_rows().iter().map(|row| row.name.clone()).collect::<Vec<_>>(),
+            vec!["sgd"]
+        );
+        assert_eq!(app.scoped_runs(), vec!["sgd"]);
+        // Reset, then exclude it instead.
+        app.update(KeyEvent::from(KeyCode::Char('U')));
+        assert_eq!(app.run_rows().len(), 2);
+        app.update(KeyEvent::from(KeyCode::Char('X')));
+        assert_eq!(
+            app.run_rows().iter().map(|row| row.name.clone()).collect::<Vec<_>>(),
+            vec!["adam"]
+        );
+    }
+
+    #[test]
     fn pixel_mode_reserves_the_panel_and_block_carries_the_image() {
         use malevich::pixel::{Graphics, Protocol};
         let (mut app, _guard) = test_app("pixel-reserve");
@@ -427,41 +735,43 @@ mod tests {
         app.ensure_materialized().unwrap();
 
         let mut terminal = Terminal::new(TestBackend::new(72, 14)).unwrap();
-        let mut panel = None;
-        terminal.draw(|frame| panel = draw(frame, &app)).unwrap();
-        let panel = panel.expect("pixel panel returned");
-        assert_eq!(panel.area.x, 28);
+        let mut panels = Vec::new();
+        terminal.draw(|frame| panels = draw(frame, &app)).unwrap();
+        assert_eq!(panels.len(), 1);
+        let panel = &panels[0];
+        let area = panel.area();
+        assert_eq!(area.x, 28);
 
         // Reserve, don't render: the chart rect stays blank in the cell
         // buffer — the image is emitted after the frame, not through it.
         let buffer = terminal.backend().buffer();
-        for y in panel.area.top()..panel.area.bottom() {
-            for x in panel.area.left()..panel.area.right() {
+        for y in area.top()..area.bottom() {
+            for x in area.left()..area.right() {
                 assert_eq!(buffer.cell((x, y)).unwrap().symbol(), " ", "at {x},{y}");
             }
         }
 
         // The post-frame block really is a kitty graphics transmission.
         let frame = malevich::Frame {
-            width: panel.area.width as usize,
-            height: panel.area.height as usize,
+            width: area.width as usize,
+            height: area.height as usize,
             charset: malevich::Charset::Quadrants,
             color: malevich::ColorMode::TrueColor,
             theme: malevich::Theme::DARK,
         };
-        let block = panel.data.plot(&panel.title).render_pixels_at(
+        let block = panel.plot().render_pixels_at(
             &frame,
             &Graphics::new(Protocol::Kitty),
-            panel.area.x as usize,
+            area.x as usize,
         );
         assert!(block.contains("\x1b_G"), "kitty APC missing");
-        assert!(block.contains(&panel.title), "chrome title missing");
+        assert!(block.contains("train/loss"), "chrome title missing");
 
-        // Help overlay wins over the image: no panel while it is open.
+        // Help overlay wins over the image: no panels while it is open.
         app.help = true;
-        let mut panel = None;
-        terminal.draw(|frame| panel = draw(frame, &app)).unwrap();
-        assert!(panel.is_none());
+        let mut panels = vec![];
+        terminal.draw(|frame| panels = draw(frame, &app)).unwrap();
+        assert!(panels.is_empty());
     }
 
     #[test]
@@ -470,6 +780,6 @@ mod tests {
         app.help = true;
         let text = snapshot(&app, 72, 20).join("\n");
         assert!(text.contains("keys"), "{text}");
-        assert!(text.contains("switch view"), "{text}");
+        assert!(text.contains("views: runs / scalars"), "{text}");
     }
 }

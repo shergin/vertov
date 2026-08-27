@@ -19,6 +19,21 @@ use crate::chart::{ChartOptions, XAxis};
 pub enum View {
     Runs,
     Scalars,
+    Compare,
+    Hparams,
+    Distributions,
+}
+
+impl View {
+    pub fn next(self) -> View {
+        match self {
+            View::Runs => View::Scalars,
+            View::Scalars => View::Compare,
+            View::Compare => View::Hparams,
+            View::Hparams => View::Distributions,
+            View::Distributions => View::Runs,
+        }
+    }
 }
 
 /// Sort column of the runs table.
@@ -49,6 +64,25 @@ impl RunsSort {
             RunsSort::Restarts => "restarts",
             RunsSort::Step => "step",
             RunsSort::Duration => "duration",
+        }
+    }
+}
+
+/// A cell of the hparams table — one small value enum so drawing and CSV
+/// export share the same rows.
+#[derive(Clone, PartialEq, Debug)]
+pub enum HparamCell {
+    Text(String),
+    Number(f64),
+    Empty,
+}
+
+impl HparamCell {
+    pub fn text(&self) -> String {
+        match self {
+            HparamCell::Text(text) => text.clone(),
+            HparamCell::Number(number) => number.to_string(),
+            HparamCell::Empty => String::new(),
         }
     }
 }
@@ -84,6 +118,15 @@ pub struct ScalarsView {
     pub smooth: f64,
     pub x_axis: XAxis,
     pub log_y: bool,
+    /// Draw preempted ghost tails as faded lines.
+    pub show_ghosts: bool,
+}
+
+pub struct DistributionsView {
+    /// Histogram tag under the cursor.
+    pub cursor: Option<String>,
+    pub filter: String,
+    pub editing_filter: bool,
 }
 
 /// What the event loop should do after a keypress.
@@ -98,6 +141,11 @@ pub struct App {
     pub view: View,
     pub runs: RunsView,
     pub scalars: ScalarsView,
+    pub distributions: DistributionsView,
+    /// HiPlot's best idea: a progressively refined working set of runs.
+    /// `K` keeps the selection (or cursor), `X` excludes it, `U` resets.
+    /// `None` means every run. Applied before the filter bar everywhere.
+    pub working_set: Option<BTreeSet<String>>,
     pub paused: bool,
     pub help: bool,
     pub interval: Duration,
@@ -131,7 +179,14 @@ impl App {
                 smooth: 0.0,
                 x_axis: XAxis::Step,
                 log_y: false,
+                show_ghosts: false,
             },
+            distributions: DistributionsView {
+                cursor: None,
+                filter: String::new(),
+                editing_filter: false,
+            },
+            working_set: None,
             paused: false,
             help: false,
             interval,
@@ -168,7 +223,14 @@ impl App {
         }
     }
 
-    /// The runs table under current filter and sort. Pure.
+    /// Whether the working set (keep/exclude refinement) admits a run.
+    fn in_working_set(&self, name: &str) -> bool {
+        self.working_set
+            .as_ref()
+            .is_none_or(|kept| kept.contains(name))
+    }
+
+    /// The runs table under working set, filter, and sort. Pure.
     pub fn run_rows(&self) -> Vec<RunRow> {
         let now = SystemTime::now();
         let window = Duration::from_secs(60).max(2 * self.interval);
@@ -179,7 +241,8 @@ impl App {
             .iter()
             .filter(|(name, run)| {
                 let status = crate::status_text(run, now, window);
-                self.filter_passes(predicate.as_ref(), name, status, run)
+                self.in_working_set(name)
+                    && self.filter_passes(predicate.as_ref(), name, status, run)
             })
             .map(|(name, run)| RunRow {
                 name: name.clone(),
@@ -216,6 +279,57 @@ impl App {
         rows
     }
 
+    /// Columns (`run` + params + metrics) and rows of the Hparams view —
+    /// the flat runs × (params + metrics) table, scoped and sorted like the
+    /// runs table. Pure; the CSV export shares it.
+    pub fn hparam_table(&self) -> (Vec<String>, Vec<Vec<HparamCell>>) {
+        use vertov_model::HparamValue;
+        let scope = self.run_rows();
+        let mut param_keys = BTreeSet::new();
+        let mut metric_tags = BTreeSet::new();
+        for row in &scope {
+            let Some(run) = self.project.runs.get(&row.name) else {
+                continue;
+            };
+            param_keys.extend(run.hparams.keys().cloned());
+            metric_tags.extend(
+                run.series
+                    .iter()
+                    .filter(|(_, series)| series.class == SeriesClass::Scalar)
+                    .map(|(tag, _)| tag.clone()),
+            );
+        }
+        let mut columns = vec!["run".to_owned()];
+        columns.extend(param_keys.iter().cloned());
+        columns.extend(metric_tags.iter().cloned());
+
+        let rows = scope
+            .iter()
+            .filter_map(|scope_row| {
+                let run = self.project.runs.get(&scope_row.name)?;
+                let mut row = vec![HparamCell::Text(scope_row.name.clone())];
+                for key in &param_keys {
+                    row.push(match run.hparams.get(key) {
+                        Some(HparamValue::F64(value)) => HparamCell::Number(*value),
+                        Some(HparamValue::String(value)) => HparamCell::Text(value.clone()),
+                        Some(HparamValue::Bool(value)) => HparamCell::Text(value.to_string()),
+                        None => HparamCell::Empty,
+                    });
+                }
+                for tag in &metric_tags {
+                    row.push(
+                        run.series
+                            .get(tag)
+                            .and_then(|series| series.summary.last())
+                            .map_or(HparamCell::Empty, |point| HparamCell::Number(point.value)),
+                    );
+                }
+                Some(row)
+            })
+            .collect();
+        (columns, rows)
+    }
+
     /// Scalar tags visible in the Scalars view: union over scoped runs,
     /// filtered by fuzzy subsequence match. Pure.
     pub fn visible_tags(&self) -> Vec<String> {
@@ -236,11 +350,17 @@ impl App {
         tags.into_iter().collect()
     }
 
-    /// The runs the Scalars view draws: the selection when non-empty, else
-    /// every run passing the runs filter.
+    /// The runs the chart views draw: the selection when non-empty, else
+    /// every run passing the working set and the runs filter.
     pub fn scoped_runs(&self) -> Vec<String> {
         if !self.runs.selected.is_empty() {
-            return self.runs.selected.iter().cloned().collect();
+            return self
+                .runs
+                .selected
+                .iter()
+                .filter(|name| self.in_working_set(name))
+                .cloned()
+                .collect();
         }
         let now = SystemTime::now();
         let window = Duration::from_secs(60).max(2 * self.interval);
@@ -250,10 +370,55 @@ impl App {
             .iter()
             .filter(|(name, run)| {
                 let status = crate::status_text(run, now, window);
-                self.filter_passes(predicate.as_ref(), name, status, run)
+                self.in_working_set(name)
+                    && self.filter_passes(predicate.as_ref(), name, status, run)
             })
             .map(|(name, _)| name.clone())
             .collect()
+    }
+
+    /// Histogram-class tags over the scoped runs, fuzzy-filtered — the
+    /// Distributions view's list. Pure.
+    pub fn histogram_tags(&self) -> Vec<String> {
+        let mut tags = BTreeSet::new();
+        for name in self.scoped_runs() {
+            let Some(run) = self.project.runs.get(&name) else {
+                continue;
+            };
+            for (tag, series) in &run.series {
+                if series.class == SeriesClass::Histogram
+                    && fuzzy_match(tag, &self.distributions.filter)
+                {
+                    tags.insert(tag.clone());
+                }
+            }
+        }
+        tags.into_iter().collect()
+    }
+
+    /// The `(run, tag)` the Distributions view shows: the cursor tag when
+    /// still visible (else the first), in the cursor run when it has the
+    /// tag (else the first scoped run that does).
+    pub fn distribution_target(&self) -> Option<(String, String)> {
+        let tags = self.histogram_tags();
+        let tag = match &self.distributions.cursor {
+            Some(cursor) if tags.contains(cursor) => cursor.clone(),
+            _ => tags.first().cloned()?,
+        };
+        let has_tag = |name: &String| {
+            self.project
+                .runs
+                .get(name)
+                .is_some_and(|run| run.series.contains_key(&tag))
+        };
+        let scope = self.scoped_runs();
+        let run = self
+            .runs
+            .cursor
+            .clone()
+            .filter(|cursor| scope.contains(cursor) && has_tag(cursor))
+            .or_else(|| scope.iter().find(|name| has_tag(name)).cloned())?;
+        Some((run, tag))
     }
 
     /// The tag the chart draws: the cursor if it still exists, else the
@@ -274,20 +439,47 @@ impl App {
             smooth: (self.scalars.smooth > 0.0).then_some(self.scalars.smooth),
             runs_filter: None,
             log_y: self.scalars.log_y,
+            show_ghosts: self.scalars.show_ghosts,
         }
     }
 
-    /// Materializes what the Scalars view is about to draw. The one place
+    /// Tags the Compare grid panels (visible scalar tags, capped) and the
+    /// runs each panel overlays (scoped, capped so the whole grid stays
+    /// inside the materialization budget).
+    pub fn compare_scope(&self) -> (Vec<String>, Vec<String>) {
+        let mut tags = self.visible_tags();
+        tags.truncate(12);
+        let mut runs = self.scoped_runs();
+        runs.truncate(4);
+        (tags, runs)
+    }
+
+    /// Materializes what the current view is about to draw. The one place
     /// the UI cycle mutates the project outside refresh.
     pub fn ensure_materialized(&mut self) -> std::io::Result<()> {
-        if self.view != View::Scalars {
-            return Ok(());
-        }
-        let Some(tag) = self.current_tag() else {
-            return Ok(());
-        };
-        for run in self.scoped_runs() {
-            self.project.materialize(&run, &tag)?;
+        match self.view {
+            View::Scalars => {
+                let Some(tag) = self.current_tag() else {
+                    return Ok(());
+                };
+                for run in self.scoped_runs() {
+                    self.project.materialize(&run, &tag)?;
+                }
+            }
+            View::Compare => {
+                let (tags, runs) = self.compare_scope();
+                for tag in &tags {
+                    for run in &runs {
+                        self.project.materialize(run, tag)?;
+                    }
+                }
+            }
+            View::Distributions => {
+                if let Some((run, tag)) = self.distribution_target() {
+                    self.project.materialize_histograms(&run, &tag)?;
+                }
+            }
+            View::Runs | View::Hparams => {}
         }
         Ok(())
     }
@@ -301,8 +493,9 @@ impl App {
         }
         // Filter editing captures almost everything.
         let editing = match self.view {
-            View::Runs => self.runs.editing_filter,
-            View::Scalars => self.scalars.editing_filter,
+            View::Runs | View::Hparams => self.runs.editing_filter,
+            View::Scalars | View::Compare => self.scalars.editing_filter,
+            View::Distributions => self.distributions.editing_filter,
         };
         if editing {
             match key.code {
@@ -329,33 +522,93 @@ impl App {
             KeyCode::Char('r') => self.force_refresh = true,
             KeyCode::Char('e') => self.export(),
             KeyCode::Char('/') => self.set_editing(true),
-            KeyCode::Tab => {
-                self.view = match self.view {
-                    View::Runs => View::Scalars,
-                    View::Scalars => View::Runs,
-                };
-            }
+            KeyCode::Tab => self.view = self.view.next(),
             KeyCode::Char('1') => self.view = View::Runs,
             KeyCode::Char('2') => self.view = View::Scalars,
+            KeyCode::Char('3') => self.view = View::Compare,
+            KeyCode::Char('4') => self.view = View::Hparams,
+            KeyCode::Char('5') => self.view = View::Distributions,
+            KeyCode::Char('K') => self.keep(),
+            KeyCode::Char('X') => self.exclude(),
+            KeyCode::Char('U') => self.working_set = None,
             _ => match self.view {
-                View::Runs => self.update_runs(key),
-                View::Scalars => self.update_scalars(key),
+                View::Runs | View::Hparams => self.update_runs(key),
+                View::Scalars | View::Compare => self.update_scalars(key),
+                View::Distributions => self.update_distributions(key),
             },
         }
         Action::Continue
     }
 
+    /// `K`: the working set becomes the selection (or the cursor run) —
+    /// HiPlot's progressive refinement, keep half.
+    fn keep(&mut self) {
+        let kept: BTreeSet<String> = if self.runs.selected.is_empty() {
+            self.runs.cursor.iter().cloned().collect()
+        } else {
+            self.runs.selected.clone()
+        };
+        if !kept.is_empty() {
+            self.working_set = Some(kept);
+            self.runs.selected.clear();
+        }
+    }
+
+    /// `X`: removes the selection (or the cursor run) from the working set.
+    fn exclude(&mut self) {
+        let excluded: BTreeSet<String> = if self.runs.selected.is_empty() {
+            self.runs.cursor.iter().cloned().collect()
+        } else {
+            self.runs.selected.clone()
+        };
+        if excluded.is_empty() {
+            return;
+        }
+        let remaining: BTreeSet<String> = self
+            .project
+            .runs
+            .keys()
+            .filter(|name| self.in_working_set(name) && !excluded.contains(*name))
+            .cloned()
+            .collect();
+        self.working_set = Some(remaining);
+        self.runs.selected.clear();
+    }
+
     fn set_editing(&mut self, editing: bool) {
         match self.view {
-            View::Runs => self.runs.editing_filter = editing,
-            View::Scalars => self.scalars.editing_filter = editing,
+            View::Runs | View::Hparams => self.runs.editing_filter = editing,
+            View::Scalars | View::Compare => self.scalars.editing_filter = editing,
+            View::Distributions => self.distributions.editing_filter = editing,
         }
     }
 
     fn filter_mut(&mut self) -> &mut String {
         match self.view {
-            View::Runs => &mut self.runs.filter,
-            View::Scalars => &mut self.scalars.filter,
+            View::Runs | View::Hparams => &mut self.runs.filter,
+            View::Scalars | View::Compare => &mut self.scalars.filter,
+            View::Distributions => &mut self.distributions.filter,
+        }
+    }
+
+    fn update_distributions(&mut self, key: KeyEvent) {
+        let tags = self.histogram_tags();
+        let position = self
+            .distributions
+            .cursor
+            .as_ref()
+            .and_then(|cursor| tags.iter().position(|tag| tag == cursor));
+        match key.code {
+            KeyCode::Down | KeyCode::Char('j') => {
+                let next = position.map_or(0, |p| (p + 1).min(tags.len().saturating_sub(1)));
+                self.distributions.cursor = tags.get(next).cloned();
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                let next = position.map_or(0, |p| p.saturating_sub(1));
+                self.distributions.cursor = tags.get(next).cloned();
+            }
+            KeyCode::Esc => self.view = View::Runs,
+            _ => {}
         }
     }
 
@@ -446,6 +699,7 @@ impl App {
                 };
             }
             KeyCode::Char('L') => self.scalars.log_y = !self.scalars.log_y,
+            KeyCode::Char('v') => self.scalars.show_ghosts = !self.scalars.show_ghosts,
             KeyCode::Esc => self.view = View::Runs,
             _ => {}
         }
@@ -456,12 +710,58 @@ impl App {
     fn export(&mut self) {
         let result = match self.view {
             View::Runs => self.export_runs(),
-            View::Scalars => self.export_scalars(),
+            View::Scalars | View::Compare => self.export_scalars(),
+            View::Hparams => self.export_hparams(),
+            View::Distributions => self.export_distributions(),
         };
         self.message = Some(match result {
             Ok(path) => format!("exported {path}"),
             Err(err) => format!("export failed: {err}"),
         });
+    }
+
+    /// The flat runs × (params + metrics) table, scoped like the view.
+    fn export_hparams(&self) -> std::io::Result<String> {
+        use crate::table::{Cell, Format, Table};
+        fn cell_from(value: HparamCell) -> Cell {
+            match value {
+                HparamCell::Text(text) => Cell::Text(text),
+                HparamCell::Number(number) => Cell::Float(number),
+                HparamCell::Empty => Cell::Empty,
+            }
+        }
+        let (columns, rows) = self.hparam_table();
+        let rows = rows
+            .into_iter()
+            .map(|row| row.into_iter().map(cell_from).collect())
+            .collect();
+        let table = Table { columns, rows };
+        let path = "vertov-hparams.csv";
+        std::fs::write(path, table.render(Format::Csv))?;
+        Ok(path.to_owned())
+    }
+
+    fn export_distributions(&self) -> std::io::Result<String> {
+        use std::fmt::Write as _;
+        let Some((run, tag)) = self.distribution_target() else {
+            return Err(std::io::Error::other("no histogram series to export"));
+        };
+        let Some(series) = self.project.histogram_series(&run, &tag) else {
+            return Err(std::io::Error::other("series not materialized yet"));
+        };
+        let mut out = String::from("run,tag,step,wall,left,right,count\n");
+        for snapshot in &series.snapshots {
+            for (left, right, count) in &snapshot.buckets {
+                let _ = writeln!(
+                    out,
+                    "{run},{tag},{},{},{left},{right},{count}",
+                    snapshot.step, snapshot.wall
+                );
+            }
+        }
+        let path = format!("vertov-{}-hist.csv", tag.replace(['/', '\\'], "-"));
+        std::fs::write(&path, out)?;
+        Ok(path)
     }
 
     fn export_runs(&self) -> std::io::Result<String> {

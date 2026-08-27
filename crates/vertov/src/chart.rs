@@ -32,15 +32,19 @@ pub struct ChartOptions {
     pub runs_filter: Option<String>,
     /// Log-10 y axis (values at or below zero become gaps, honestly).
     pub log_y: bool,
+    /// Draw preempted ghost tails as faded lines — data honesty over
+    /// tidiness, on demand.
+    pub show_ghosts: bool,
 }
 
-/// One drawn series: label, x column, raw values, and the optional
-/// smoothed overlay.
+/// One drawn series: label, x column, raw values, the optional smoothed
+/// overlay, and any ghost tails to draw faded.
 struct ChartSeries {
     label: String,
     xs: Vec<f64>,
     values: Vec<f64>,
     smoothed: Option<Vec<f64>>,
+    ghosts: Vec<(Vec<f64>, Vec<f64>)>,
 }
 
 /// Owned series data for one chart: labels and columns the plot borrows
@@ -169,6 +173,10 @@ impl ChartData {
     pub fn plot<'a>(&'a self, title: &str) -> Plot<'a> {
         let mut plot = Plot::new();
         for series in &self.series {
+            // Ghost tails go under everything, faded and unlabeled.
+            for (xs, values) in &series.ghosts {
+                plot = plot.layer(Line::xy(&xs[..], &values[..]).color(Color::BrightBlack));
+            }
             let raw = Line::xy(&series.xs[..], &series.values[..]);
             plot = match &series.smoothed {
                 Some(smoothed) => plot.layer(raw.color(Color::BrightBlack)).layer(
@@ -190,6 +198,137 @@ impl ChartData {
         }
         if self.log_y {
             plot = plot.y_scale(Scale::Log);
+        }
+        plot.title(title)
+    }
+
+    /// The x range this chart's live series span, for sharing a domain
+    /// across compare panels.
+    pub fn x_extent(&self) -> Option<(f64, f64)> {
+        let mut extent: Option<(f64, f64)> = None;
+        for series in &self.series {
+            let (Some(&first), Some(&last)) = (series.xs.first(), series.xs.last()) else {
+                continue;
+            };
+            extent = Some(match extent {
+                Some((min, max)) => (min.min(first), max.max(last)),
+                None => (first, last),
+            });
+        }
+        extent
+    }
+
+    /// A small-multiples panel: the same layers as [`plot`](Self::plot) but
+    /// legend-free (colors stay consistent because runs layer in the same
+    /// order in every panel) and on a shared x domain.
+    pub fn compare_plot<'a>(&'a self, title: &str, domain: Option<(f64, f64)>) -> Plot<'a> {
+        let mut plot = Plot::new();
+        for series in &self.series {
+            let raw = Line::xy(&series.xs[..], &series.values[..]);
+            plot = match &series.smoothed {
+                Some(smoothed) => plot
+                    .layer(raw.color(Color::BrightBlack))
+                    .layer(Line::xy(&series.xs[..], &smoothed[..])),
+                None => plot.layer(raw),
+            };
+        }
+        for &boundary in &self.boundaries {
+            plot = plot.layer(Rule::v(boundary));
+        }
+        if let Some((min, max)) = domain
+            && min < max
+        {
+            plot = plot.x_domain(min, max);
+        }
+        if self.time_x {
+            plot = plot.x_scale(Scale::Time);
+        }
+        if self.log_y {
+            plot = plot.y_scale(Scale::Log);
+        }
+        plot.title(title)
+    }
+}
+
+/// Ridgeline data for one histogram series: sampled snapshots as lifted
+/// rectangular profiles, rendered back to front (the TensorBoard histogram
+/// dashboard, malevich's documented ridgeline composition).
+pub struct DistData {
+    /// Rows oldest-first; each is `(xs, lifted ys)`. Oldest draws first at
+    /// the highest lift so nearer rows overwrite what they cross.
+    rows: Vec<(Vec<f64>, Vec<f64>)>,
+    /// Steps of the back (oldest) and front (newest) drawn rows.
+    pub step_range: (i64, i64),
+    /// Rows drawn vs snapshots held — the title says when it sampled.
+    pub drawn: usize,
+    pub total: usize,
+}
+
+impl DistData {
+    /// Samples up to `max_rows` snapshots evenly (always including the
+    /// first and the last) and builds the lifted profiles.
+    pub fn build(series: &vertov_model::HistogramSeries, max_rows: usize) -> Option<DistData> {
+        let total = series.snapshots.len();
+        if total == 0 || max_rows == 0 {
+            return None;
+        }
+        let indices: Vec<usize> = if total <= max_rows {
+            (0..total).collect()
+        } else {
+            (0..max_rows)
+                .map(|row| row * (total - 1) / (max_rows - 1))
+                .collect()
+        };
+        const LIFT: f64 = 0.55;
+        const HEIGHT: f64 = 1.6;
+        let count = indices.len();
+        let mut rows = Vec::with_capacity(count);
+        for (position, &index) in indices.iter().enumerate() {
+            let snapshot = &series.snapshots[index];
+            let lift = (count - 1 - position) as f64 * LIFT;
+            // Density profile normalized to a fixed peak per row, drawn as
+            // a rectangular silhouette: baseline, per-bucket steps,
+            // baseline.
+            let peak = snapshot
+                .buckets
+                .iter()
+                .map(|(left, right, count)| count / (right - left).max(f64::MIN_POSITIVE))
+                .fold(0.0, f64::max);
+            let mut xs = Vec::with_capacity(snapshot.buckets.len() + 2);
+            let mut ys = Vec::with_capacity(snapshot.buckets.len() + 2);
+            if let Some(&(left, _, _)) = snapshot.buckets.first() {
+                xs.push(left);
+                ys.push(lift);
+            }
+            for &(left, right, count) in &snapshot.buckets {
+                let density = count / (right - left).max(f64::MIN_POSITIVE);
+                let height = if peak > 0.0 { density / peak * HEIGHT } else { 0.0 };
+                xs.push(left);
+                ys.push(lift + height);
+            }
+            if let Some(&(_, right, _)) = snapshot.buckets.last() {
+                xs.push(right);
+                ys.push(lift);
+            }
+            rows.push((xs, ys));
+        }
+        Some(DistData {
+            rows,
+            step_range: (
+                series.snapshots[indices[0]].step,
+                series.snapshots[*indices.last().expect("nonempty")].step,
+            ),
+            drawn: count,
+            total,
+        })
+    }
+
+    /// The ridgeline: rows layered oldest (farthest, highest lift) first in
+    /// the corners style, so each nearer row overwrites what it crosses.
+    pub fn plot<'a>(&'a self, title: &str) -> Plot<'a> {
+        let mut plot = Plot::new();
+        for (xs, ys) in &self.rows {
+            plot = plot.layer(Line::xy(&xs[..], &ys[..]).style(malevich::LineStyle::Corners));
         }
         plot.title(title)
     }
@@ -219,10 +358,30 @@ fn push_series(
         boundaries.insert(xs[boundary].to_bits());
     }
     let smoothed = options.smooth.map(|alpha| stat::ewma(&points.values, alpha));
+    let ghosts = if options.show_ghosts {
+        points
+            .ghosts
+            .iter()
+            .map(|ghost| {
+                let xs: Vec<f64> = match options.x_axis {
+                    XAxis::Step => ghost.steps.iter().map(|&step| step as f64).collect(),
+                    XAxis::Wall => ghost.walls.clone(),
+                    XAxis::Relative => {
+                        let first = points.walls[0];
+                        ghost.walls.iter().map(|wall| wall - first).collect()
+                    }
+                };
+                (xs, ghost.values.clone())
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
     series.push(ChartSeries {
         label,
         xs,
         values: points.values.clone(),
         smoothed,
+        ghosts,
     });
 }
