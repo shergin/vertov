@@ -38,6 +38,7 @@ pub fn run(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
         };
         rows.push(vec![
             Cell::Text(name.clone()),
+            Cell::Text(run.backend.label().to_owned()),
             Cell::Text(crate::status_text(run, now, window).to_owned()),
             Cell::Int(run.series.len() as i64),
             Cell::Int(points as i64),
@@ -48,9 +49,11 @@ pub fn run(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let table = Table {
-        columns: ["run", "status", "series", "points", "restarts", "step", "duration"]
-            .map(String::from)
-            .to_vec(),
+        columns: [
+            "run", "backend", "status", "series", "points", "restarts", "step", "duration",
+        ]
+        .map(String::from)
+        .to_vec(),
         rows,
     };
     print!("{}", table.render(args.format));

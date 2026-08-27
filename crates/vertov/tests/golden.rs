@@ -94,9 +94,9 @@ fn ls_text_golden() {
     assert!(ok);
     assert_eq!(
         stdout,
-        "run   status  series  points  restarts  step  duration\n\
-         adam  active       2      20         0     9  90s\n\
-         sgd   active       1      10         1     7  2m50s\n"
+        "run   backend   status  series  points  restarts  step  duration\n\
+         adam  tfevents  active       2      20         0     9  90s\n\
+         sgd   tfevents  active       1      10         1     7  2m50s\n"
     );
 }
 
@@ -107,7 +107,7 @@ fn ls_json_golden() {
     assert!(ok);
     assert_eq!(
         stdout,
-        "[\n  {\"run\": \"adam\", \"status\": \"active\", \"series\": 2, \"points\": 20, \"restarts\": 0, \"step\": 9, \"duration\": \"90s\"},\n  {\"run\": \"sgd\", \"status\": \"active\", \"series\": 1, \"points\": 10, \"restarts\": 1, \"step\": 7, \"duration\": \"2m50s\"}\n]\n"
+        "[\n  {\"run\": \"adam\", \"backend\": \"tfevents\", \"status\": \"active\", \"series\": 2, \"points\": 20, \"restarts\": 0, \"step\": 9, \"duration\": \"90s\"},\n  {\"run\": \"sgd\", \"backend\": \"tfevents\", \"status\": \"active\", \"series\": 1, \"points\": 10, \"restarts\": 1, \"step\": 7, \"duration\": \"2m50s\"}\n]\n"
     );
 }
 
@@ -215,6 +215,6 @@ fn runs_filter_limits_every_table() {
     assert!(ok);
     assert_eq!(
         stdout,
-        "run,status,series,points,restarts,step,duration\nsgd,active,1,10,1,7,2m50s\n"
+        "run,backend,status,series,points,restarts,step,duration\nsgd,tfevents,active,1,10,1,7,2m50s\n"
     );
 }
