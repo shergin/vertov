@@ -62,6 +62,10 @@ def main() -> None:
         pending += payload
         if opts.get(b"m", b"0") != b"1" and meta:
             rgba = base64.b64decode(pending)
+            if opts.get(b"o") == b"z" or rgba[:1] == b"\x78":
+                import zlib
+
+                rgba = zlib.decompress(rgba)
             png = rgba_to_png(rgba, meta["w"], meta["h"])
             save_png(outdir, count, png, f"kitty {meta['w']}x{meta['h']}")
             count += 1
