@@ -25,13 +25,17 @@ each principle is argued in [docs/principles/](docs/principles/).
   on-disk summary cache for warm starts.
 - [`crates/vertov`](crates/vertov) — the binary. `vertov <logdir>` opens the
   TUI: a sortable runs table with a predicate filter bar
-  (`lr > 1e-3 and status == active`), a scalars view with smoothing, log-y,
-  and switchable x axis, live polling that never loses cursor/selection/
-  filter state, one-keystroke CSV export — and chart panels drawn as real
-  antialiased images where the terminal speaks sixel, kitty, or iTerm2
-  graphics (cell glyphs as the honest fallback). Headless: `show`, `tail`,
-  `ls`, `summary`, `export` in text, CSV, or JSON.
-  Build it with `cargo run -p vertov`.
+  (`lr > 1e-3 and status == active`) and HiPlot-style keep/exclude
+  refinement; scalars with smoothing, log-y, ghost (pre-restart) tails, and
+  an x axis switchable between step, wall, relative, and tokens (mapped
+  through the run's token-counter series); a compare grid of small
+  multiples on a shared domain; the flat hparams × metrics table; and
+  histogram distributions as ridgelines. Live polling never loses
+  cursor/selection/filter state, every view exports to CSV on one
+  keystroke, and chart panels draw as real antialiased images where the
+  terminal speaks sixel, kitty, or iTerm2 graphics (cell glyphs as the
+  honest fallback). Headless: `show`, `tail`, `ls`, `summary`, `export`
+  in text, CSV, or JSON. Build it with `cargo run -p vertov`.
 - [`fixtures/`](fixtures) — recorded logs from real writers, checked in with
   the scripts that made them.
 
