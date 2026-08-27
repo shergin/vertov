@@ -1,0 +1,14 @@
+artifact_uri: file:///Users/shergin/src/vertov/fixtures/mlflow/mlruns/0/3491f563f89e490183b83be7cecf5353/artifacts
+end_time: 1787793914657
+entry_point_name: ''
+experiment_id: '0'
+lifecycle_stage: active
+run_id: 3491f563f89e490183b83be7cecf5353
+run_name: warm-start-7
+source_name: ''
+source_type: 4
+source_version: ''
+start_time: 1787793914638
+status: 3
+tags: []
+user_id: shergin

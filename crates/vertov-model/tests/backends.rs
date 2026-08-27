@@ -218,6 +218,63 @@ fn mixed_root_carries_all_backends() {
 }
 
 #[test]
+fn real_dvclive_fixture_parses() {
+    let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures");
+    let mut project = Project::new(fixtures.join("dvclive"));
+    project.refresh().unwrap();
+
+    let run = &project.runs["exp"];
+    assert_eq!(run.backend, Backend::Dvclive);
+    assert_eq!(run.hparams["lr"], vertov_model::HparamValue::F64(0.005));
+    assert_eq!(
+        run.hparams["optimizer"],
+        vertov_model::HparamValue::String("adamw".into())
+    );
+    for tag in ["train/loss", "train/accuracy"] {
+        assert_eq!(run.series[tag].summary.count(), 12, "{tag}");
+    }
+    let points = project.materialize("exp", "train/loss").unwrap().unwrap();
+    assert_eq!(points.steps, (0..12).collect::<Vec<i64>>());
+    for (index, &value) in points.values.iter().enumerate() {
+        let expected = 6.0 * (-0.4 * index as f64).exp() + 0.25;
+        assert!(
+            (value - expected).abs() < 1e-12,
+            "step {index}: {value} vs {expected}"
+        );
+    }
+}
+
+#[test]
+fn real_mlflow_fixture_parses() {
+    let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures");
+    let mut project = Project::new(fixtures.join("mlflow"));
+    project.refresh().unwrap();
+
+    assert_eq!(project.runs.len(), 1);
+    let run = &project.runs["warm-start-7"];
+    assert_eq!(run.backend, Backend::Mlflow);
+    assert_eq!(run.hparams["lr"], vertov_model::HparamValue::F64(0.02));
+    assert_eq!(
+        run.hparams["optimizer"],
+        vertov_model::HparamValue::String("sgd".into())
+    );
+    // Metric names with slashes land as nested files and read back whole.
+    assert_eq!(run.series["val/accuracy"].summary.count(), 10);
+    // Wall times came from the millisecond timestamps.
+    assert!(run.first_wall.unwrap() > 1.7e9);
+
+    let points = project.materialize("warm-start-7", "loss").unwrap().unwrap();
+    assert_eq!(points.steps, (0..10).collect::<Vec<i64>>());
+    for (index, &value) in points.values.iter().enumerate() {
+        let expected = 3.0 * (-0.5 * index as f64).exp() + 0.1;
+        assert!(
+            (value - expected).abs() < 1e-12,
+            "step {index}: {value} vs {expected}"
+        );
+    }
+}
+
+#[test]
 fn vanished_dvclive_run_is_dropped() {
     let logdir = Logdir::new("dvclive-vanish");
     logdir.write("run/dvclive/plots/metrics/loss.tsv", "step\tloss\n0\t1.0\n");
