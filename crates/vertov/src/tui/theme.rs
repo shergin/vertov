@@ -17,10 +17,12 @@ pub const BAND: Color = Color::Rgb(52, 51, 49);
 pub const BORDER: Color = Color::Rgb(88, 86, 82);
 /// Secondary text: hints, counts, durations.
 pub const DIM: Color = Color::Rgb(148, 145, 138);
-/// Run states.
-pub const LIVE: Color = Color::Rgb(120, 190, 100);
-pub const STALE: Color = Color::Rgb(224, 164, 66);
-pub const DONE: Color = Color::Rgb(122, 152, 189);
+/// Run states — members of the chart palette (`crate::chart::SERIES`):
+/// live wears the sage, stale the amber, done the sky, so a run's status
+/// dot and its chart lines come from one set.
+pub const LIVE: Color = Color::Rgb(139, 178, 91);
+pub const STALE: Color = Color::Rgb(222, 168, 62);
+pub const DONE: Color = Color::Rgb(108, 153, 212);
 
 pub fn border() -> Style {
     Style::default().fg(BORDER)

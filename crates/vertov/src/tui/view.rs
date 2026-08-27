@@ -134,17 +134,19 @@ fn draw_header(frame: &mut Frame, app: &App, area: Rect) {
     );
 }
 
-/// The hero state of an empty project: the dotted wordmark, what vertov
-/// is watching, and a short menu — borderless and centered, so the first
+/// The wordmark. Rows share one width so per-line centering cannot shear
+/// the art.
+const MARK: [&str; 4] = [
+    "             _           ",
+    " _ _ ___ ___| |_ ___ _ _ ",
+    "| | | -_|  _|  _| . | | |",
+    " \\_/|___|_| |_| |___|\\_/ ",
+];
+
+/// The hero state of an empty project: the wordmark, what vertov is
+/// watching, and a short menu — borderless and centered, so the first
 /// impression is calm rather than an empty table.
 fn draw_welcome(frame: &mut Frame, app: &App, area: Rect) {
-    // Rows share one width so per-line centering cannot shear the art.
-    const MARK: [&str; 4] = [
-        "             _           ",
-        " _ _ ___ ___| |_ ___ _ _ ",
-        "| | | -_|  _|  _| . | | |",
-        " \\_/|___|_| |_| |___|\\_/ ",
-    ];
     const MENU: &[(&str, &str)] = &[
         ("refresh now", "r"),
         ("keyboard shortcuts", "?"),
@@ -819,6 +821,10 @@ fn draw_help(frame: &mut Frame, area: Rect) {
         ),
     ];
     let mut lines = vec![Line::raw("")];
+    for row in MARK {
+        lines.push(Line::from(Span::styled(row, theme::dim())).centered());
+    }
+    lines.push(Line::raw(""));
     for (section, keys) in SECTIONS {
         lines.push(Line::from(Span::styled(
             format!("  {section}"),
@@ -1278,8 +1284,9 @@ mod tests {
     fn help_overlay_renders() {
         let (mut app, _guard) = test_app("help");
         app.help = true;
-        let text = snapshot(&app, 72, 26).join("\n");
+        let text = snapshot(&app, 72, 32).join("\n");
         assert!(text.contains("keyboard shortcuts"), "{text}");
+        assert!(text.contains("| . | | |"), "the wordmark: {text}");
         assert!(text.contains("views: runs, scalars"), "{text}");
         assert!(text.contains("any key closes"), "{text}");
     }

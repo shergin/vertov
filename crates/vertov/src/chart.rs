@@ -11,6 +11,21 @@ use vertov_model::{Project, SeriesClass};
 /// More series than this and the chart is soup; the title says what was cut.
 const MAX_SERIES: usize = 16;
 
+/// The series palette: eight hues in one luminance band, opening on the
+/// brand vermilion. The TUI's semantic colors are members of this set
+/// (live = sage, stale = amber, done = sky — see `tui::theme`), so charts
+/// and chrome speak one language.
+pub const SERIES: [Color; 8] = [
+    Color::Rgb(227, 66, 52),   // vermilion — the brand
+    Color::Rgb(222, 168, 62),  // amber
+    Color::Rgb(139, 178, 91),  // sage
+    Color::Rgb(86, 178, 163),  // teal
+    Color::Rgb(108, 153, 212), // sky
+    Color::Rgb(154, 128, 200), // violet
+    Color::Rgb(214, 116, 155), // rose
+    Color::Rgb(176, 148, 116), // taupe
+];
+
 /// Which column drives the x axis.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum XAxis {
@@ -271,17 +286,20 @@ impl ChartData {
     /// from labels, title as given.
     pub fn plot<'a>(&'a self, title: &str) -> Plot<'a> {
         let mut plot = Plot::new();
-        for series in &self.series {
+        for (index, series) in self.series.iter().enumerate() {
             // Ghost tails go under everything, faded and unlabeled.
             for (xs, values) in &series.ghosts {
                 plot = plot.layer(Line::xy(&xs[..], &values[..]).color(Color::BrightBlack));
             }
+            let color = SERIES[index % SERIES.len()];
             let raw = Line::xy(&series.xs[..], &series.values[..]);
             plot = match &series.smoothed {
                 Some(smoothed) => plot.layer(raw.color(Color::BrightBlack)).layer(
-                    Line::xy(&series.xs[..], &smoothed[..]).label(series.label.as_str()),
+                    Line::xy(&series.xs[..], &smoothed[..])
+                        .label(series.label.as_str())
+                        .color(color),
                 ),
-                None => plot.layer(raw.label(series.label.as_str())),
+                None => plot.layer(raw.label(series.label.as_str()).color(color)),
             };
         }
         for (index, &boundary) in self.boundaries.iter().enumerate() {
@@ -350,13 +368,14 @@ impl ChartData {
     /// order in every panel) and on a shared x domain.
     pub fn compare_plot<'a>(&'a self, title: &str, domain: Option<(f64, f64)>) -> Plot<'a> {
         let mut plot = Plot::new();
-        for series in &self.series {
+        for (index, series) in self.series.iter().enumerate() {
+            let color = SERIES[index % SERIES.len()];
             let raw = Line::xy(&series.xs[..], &series.values[..]);
             plot = match &series.smoothed {
                 Some(smoothed) => plot
                     .layer(raw.color(Color::BrightBlack))
-                    .layer(Line::xy(&series.xs[..], &smoothed[..])),
-                None => plot.layer(raw),
+                    .layer(Line::xy(&series.xs[..], &smoothed[..]).color(color)),
+                None => plot.layer(raw.color(color)),
             };
         }
         for &boundary in &self.boundaries {
@@ -480,7 +499,11 @@ impl DistData {
     pub fn plot<'a>(&'a self, title: &str) -> Plot<'a> {
         let mut plot = Plot::new();
         for (xs, ys) in &self.rows {
-            plot = plot.layer(Line::xy(&xs[..], &ys[..]).style(malevich::LineStyle::Corners));
+            plot = plot.layer(
+                Line::xy(&xs[..], &ys[..])
+                    .style(malevich::LineStyle::Corners)
+                    .color(SERIES[4]),
+            );
         }
         plot.title(title)
     }
