@@ -76,7 +76,11 @@ pub fn draw(frame: &mut Frame, app: &App, blank_panels: bool) -> Vec<PixelPanel>
     draw_header(frame, app, header);
     let panels = match app.view {
         View::Runs => {
-            draw_runs(frame, app, body);
+            if app.project.runs.is_empty() {
+                draw_welcome(frame, app, body);
+            } else {
+                draw_runs(frame, app, body);
+            }
             Vec::new()
         }
         View::Scalars => draw_scalars(frame, app, body, blank_panels),
@@ -116,11 +120,7 @@ fn draw_header(frame: &mut Frame, app: &App, area: Rect) {
         ));
         spans.push(Span::styled(
             format!("{label}  "),
-            if active {
-                theme::title_focus()
-            } else {
-                theme::dim()
-            },
+            if active { theme::header() } else { theme::dim() },
         ));
     }
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
@@ -132,6 +132,80 @@ fn draw_header(frame: &mut Frame, app: &App, area: Rect) {
         .alignment(ratatui::layout::Alignment::Right),
         area,
     );
+}
+
+/// The hero state of an empty project: the dotted wordmark, what vertov
+/// is watching, and a short menu — borderless and centered, so the first
+/// impression is calm rather than an empty table.
+fn draw_welcome(frame: &mut Frame, app: &App, area: Rect) {
+    const MARK: [&str; 5] = [
+        "•   •  •••••  ••••   •••••   •••   •   •",
+        "•   •  •      •   •    •    •   •  •   •",
+        "•   •  •••    ••••     •    •   •  •   •",
+        " • •   •      •  •     •    •   •   • • ",
+        "  •    •••••  •   •    •     •••     •  ",
+    ];
+    const MENU: &[(&str, &str)] = &[
+        ("refresh now", "r"),
+        ("keyboard shortcuts", "?"),
+        ("quit", "q"),
+    ];
+    let mut lines: Vec<Line> = MARK
+        .iter()
+        .map(|row| Line::from(Span::styled(*row, theme::dim())).centered())
+        .collect();
+    lines.push(Line::raw(""));
+    lines.push(Line::raw(""));
+    // Home-relative and middle-truncated: the path orients, it need not
+    // survive a copy-paste.
+    let mut path = app.project.root().display().to_string();
+    if let Ok(home) = std::env::var("HOME")
+        && let Some(rest) = path.strip_prefix(&home)
+    {
+        path = format!("~{rest}");
+    }
+    let room = usize::from(area.width).saturating_sub(14).max(16);
+    if path.chars().count() > room {
+        let tail: String = path
+            .chars()
+            .rev()
+            .take(room - 1)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect();
+        path = format!("…{tail}");
+    }
+    lines.push(Line::from(Span::styled(format!("watching {path}"), theme::dim())).centered());
+    lines.push(
+        Line::from(Span::styled(
+            "no runs yet — the first event file appears the moment it lands",
+            theme::dim(),
+        ))
+        .centered(),
+    );
+    lines.push(Line::raw(""));
+    lines.push(Line::raw(""));
+    // A Grok-style menu: bold label, the key far right, in a narrow
+    // centered column.
+    let column = 34u16.min(area.width);
+    let pad = usize::from(area.width.saturating_sub(column) / 2);
+    for (label, key) in MENU {
+        let fill = usize::from(column).saturating_sub(label.len() + key.len());
+        lines.push(Line::from(vec![
+            Span::raw(" ".repeat(pad)),
+            Span::styled(*label, theme::header()),
+            Span::raw(" ".repeat(fill)),
+            Span::styled(*key, theme::dim()),
+        ]));
+    }
+    let top = area.height.saturating_sub(lines.len() as u16) / 3;
+    let body = Rect {
+        y: area.y + top,
+        height: area.height.saturating_sub(top),
+        ..area
+    };
+    frame.render_widget(Paragraph::new(lines), body);
 }
 
 fn draw_runs(frame: &mut Frame, app: &App, area: Rect) {
@@ -241,6 +315,7 @@ fn draw_runs(frame: &mut Frame, app: &App, area: Rect) {
     }
     let table = Table::new(table_rows, constraints)
         .header(header)
+        .row_highlight_style(theme::cursor_row())
         .block(panel_block(&title, app.runs.editing_filter));
     // Stateful render purely for scrolling: the state is rebuilt from the
     // cursor every frame, so the table follows it below the fold.
@@ -279,22 +354,14 @@ fn draw_scalars(frame: &mut Frame, app: &App, area: Rect, blank: bool) -> Vec<Pi
 
     let tags = app.visible_tags();
     let current = app.current_tag();
-    let items: Vec<ListItem> = tags
-        .iter()
-        .map(|tag| {
-            let style = if Some(tag) == current.as_ref() {
-                theme::cursor_row()
-            } else {
-                Style::default()
-            };
-            ListItem::new(tag.clone()).style(style)
-        })
-        .collect();
+    let items: Vec<ListItem> = tags.iter().map(|tag| ListItem::new(tag.clone())).collect();
     let title = panel_title("tags", &app.scalars.filter, app.scalars.editing_filter);
     let mut state = ListState::default()
         .with_selected(tags.iter().position(|tag| Some(tag) == current.as_ref()));
     frame.render_stateful_widget(
-        List::new(items).block(panel_block(&title, app.scalars.editing_filter)),
+        List::new(items)
+            .highlight_style(theme::cursor_row())
+            .block(panel_block(&title, app.scalars.editing_filter)),
         left,
         &mut state,
     );
@@ -452,6 +519,7 @@ fn draw_hparams(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_stateful_widget(
         Table::new(table_rows, constraints)
             .header(header)
+            .row_highlight_style(theme::cursor_row())
             .block(panel_block(&title, app.runs.editing_filter)),
         area,
         &mut state,
@@ -466,17 +534,7 @@ fn draw_distributions(frame: &mut Frame, app: &App, area: Rect, blank: bool) -> 
     let tags = app.histogram_tags();
     let target = app.distribution_target();
     let current_tag = target.as_ref().map(|(_, tag)| tag.clone());
-    let items: Vec<ListItem> = tags
-        .iter()
-        .map(|tag| {
-            let style = if Some(tag) == current_tag.as_ref() {
-                theme::cursor_row()
-            } else {
-                Style::default()
-            };
-            ListItem::new(tag.clone()).style(style)
-        })
-        .collect();
+    let items: Vec<ListItem> = tags.iter().map(|tag| ListItem::new(tag.clone())).collect();
     let title = panel_title(
         "histograms",
         &app.distributions.filter,
@@ -485,7 +543,9 @@ fn draw_distributions(frame: &mut Frame, app: &App, area: Rect, blank: bool) -> 
     let mut state = ListState::default()
         .with_selected(tags.iter().position(|tag| Some(tag) == current_tag.as_ref()));
     frame.render_stateful_widget(
-        List::new(items).block(panel_block(&title, app.distributions.editing_filter)),
+        List::new(items)
+            .highlight_style(theme::cursor_row())
+            .block(panel_block(&title, app.distributions.editing_filter)),
         left,
         &mut state,
     );
@@ -711,9 +771,12 @@ fn draw_status(frame: &mut Frame, app: &App, area: Rect) {
         Some(message) => Line::from(Span::styled(message.clone(), theme::accent())),
         None => {
             let mut spans = vec![Span::raw(" ")];
-            for (key, what) in hints(app.view) {
-                spans.push(Span::styled(*key, theme::accent()));
-                spans.push(Span::styled(format!(" {what}   "), theme::dim()));
+            for (index, (key, what)) in hints(app.view).iter().enumerate() {
+                if index > 0 {
+                    spans.push(Span::styled("  |  ", theme::separator()));
+                }
+                spans.push(Span::styled(*key, theme::key()));
+                spans.push(Span::styled(format!(" {what}"), theme::dim()));
             }
             Line::from(spans)
         }
@@ -726,30 +789,51 @@ fn draw_status(frame: &mut Frame, app: &App, area: Rect) {
 }
 
 fn draw_help(frame: &mut Frame, area: Rect) {
-    const KEYS: &[(&str, &str)] = &[
-        ("q", "quit"),
-        ("?", "this help — any key closes"),
-        ("Tab · 1-5", "views: runs, scalars, compare, hparams, dists"),
-        ("/", "filter · a predicate works: lr > 1e-3 and status == active"),
-        ("Esc", "progressively: editor, selection, filter, back"),
-        ("K / X / U", "keep / exclude selection as working set / reset"),
-        ("e", "export this view as CSV, next to your shell"),
-        ("p · r", "pause polling · refresh now"),
-        ("", ""),
-        ("j k g G", "move · space picks runs for overlay · Enter opens"),
-        ("s / S", "runs: sort column, reverse · scalars: smoothing -/+"),
-        ("L · x · v", "log-y · x axis: step, wall, relative, tokens · ghosts"),
-        ("← →", "crosshair point by point, with exact values in the title"),
-        ("+ - [ ] 0", "zoom around the crosshair · pan · fit everything"),
+    const SECTIONS: &[(&str, &[(&str, &str)])] = &[
+        (
+            "everywhere",
+            &[
+                ("Tab · 1-5", "views: runs, scalars, compare, hparams, dists"),
+                ("/", "filter · a predicate works: lr > 1e-3 and status == active"),
+                ("Esc", "progressively: editor, selection, filter, back"),
+                ("K / X / U", "keep / exclude selection as working set / reset"),
+                ("e", "export this view as CSV, next to your shell"),
+                ("p · r", "pause polling · refresh now"),
+                ("q", "quit"),
+            ],
+        ),
+        (
+            "navigate",
+            &[
+                ("j k g G", "move · space picks runs for overlay · Enter opens"),
+                ("s / S", "runs: sort column, reverse · scalars: smoothing -/+"),
+            ],
+        ),
+        (
+            "charts",
+            &[
+                ("L · x · v", "log-y · x axis: step, wall, relative, tokens · ghosts"),
+                ("← →", "crosshair point by point, with exact values in the title"),
+                ("+ - [ ] 0", "zoom around the crosshair · pan · fit everything"),
+            ],
+        ),
     ];
     let mut lines = vec![Line::raw("")];
-    for (key, what) in KEYS {
-        lines.push(Line::from(vec![
-            Span::styled(format!("  {key:>10}  "), theme::accent()),
-            Span::styled((*what).to_owned(), Style::default()),
-        ]));
+    for (section, keys) in SECTIONS {
+        lines.push(Line::from(Span::styled(
+            format!("  {section}"),
+            theme::dim(),
+        )));
+        for (key, what) in *keys {
+            lines.push(Line::from(vec![
+                Span::styled(format!("  {key:>10}  "), theme::key()),
+                Span::raw(*what),
+            ]));
+        }
+        lines.push(Line::raw(""));
     }
-    let height = lines.len() as u16 + 3;
+    lines.push(Line::from(Span::styled("any key closes", theme::dim())).centered());
+    let height = lines.len() as u16 + 2;
     let width = 76.min(area.width);
     let popup = Rect {
         x: area.width.saturating_sub(width) / 2,
@@ -758,7 +842,15 @@ fn draw_help(frame: &mut Frame, area: Rect) {
         height: height.min(area.height),
     };
     frame.render_widget(Clear, popup);
-    frame.render_widget(Paragraph::new(lines).block(panel_block("keys", true)), popup);
+    // A calm modal, not a focused panel: neutral border, primary title —
+    // the overlay is the only thing on screen, it needs no accent to be
+    // found.
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(ratatui::widgets::BorderType::Rounded)
+        .border_style(theme::border())
+        .title(Span::styled(" keyboard shortcuts ", theme::title_focus()));
+    frame.render_widget(Paragraph::new(lines).block(block), popup);
 }
 
 #[cfg(test)]
@@ -1186,8 +1278,9 @@ mod tests {
     fn help_overlay_renders() {
         let (mut app, _guard) = test_app("help");
         app.help = true;
-        let text = snapshot(&app, 72, 20).join("\n");
-        assert!(text.contains("keys"), "{text}");
+        let text = snapshot(&app, 72, 26).join("\n");
+        assert!(text.contains("keyboard shortcuts"), "{text}");
         assert!(text.contains("views: runs, scalars"), "{text}");
+        assert!(text.contains("any key closes"), "{text}");
     }
 }

@@ -1,15 +1,18 @@
-//! The TUI's visual voice: constructivist restraint. One accent — the
-//! kino-eye vermilion — spent only on orientation (active tab, focused
-//! frame, cursor, sort mark); quiet graphite chrome around it; muted
-//! semantic colors for run state. The terminal's own background is always
-//! respected: nothing paints large fields.
+//! The TUI's visual voice: constructivist restraint. A grayscale ramp
+//! carries the whole hierarchy — bold terminal-default for what matters
+//! now, gray for what supports it, dark gray for chrome — and the one
+//! accent, the kino-eye vermilion, is spent only on orientation: the
+//! brand mark, the active tab's key, the focused frame, the selection
+//! marker, a transient message. Keys in hint bars are bold, not colored;
+//! the cursor row is a neutral band, not a tinted one. The terminal's
+//! own background is always respected: nothing paints large fields.
 
 use ratatui::style::{Color, Modifier, Style};
 
 /// El Lissitzky's vermilion — the one loud color.
 pub const ACCENT: Color = Color::Rgb(227, 66, 52);
-/// The accent dimmed to a tint fit for a cursor-row background.
-pub const ACCENT_DIM: Color = Color::Rgb(84, 32, 26);
+/// A neutral graphite band for the cursor row.
+pub const BAND: Color = Color::Rgb(52, 51, 49);
 /// Quiet chrome: unfocused borders, separators.
 pub const BORDER: Color = Color::Rgb(88, 86, 82);
 /// Secondary text: hints, counts, durations.
@@ -31,8 +34,12 @@ pub fn title() -> Style {
     Style::default().fg(DIM).add_modifier(Modifier::BOLD)
 }
 
+/// A focused panel's title: promoted to the primary tier, not colored —
+/// the accent border already says where the keyboard is. The explicit
+/// `Reset` matters: block titles inherit the border's color unless the
+/// title states its own.
 pub fn title_focus() -> Style {
-    Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)
+    Style::default().fg(Color::Reset).add_modifier(Modifier::BOLD)
 }
 
 pub fn dim() -> Style {
@@ -44,11 +51,22 @@ pub fn accent() -> Style {
 }
 
 pub fn cursor_row() -> Style {
-    Style::default().bg(ACCENT_DIM).add_modifier(Modifier::BOLD)
+    Style::default().bg(BAND).add_modifier(Modifier::BOLD)
 }
 
 pub fn header() -> Style {
     Style::default().add_modifier(Modifier::BOLD)
+}
+
+/// A key in a hint bar: bold, never colored — Grok's grammar, where the
+/// verb is dim and the key carries the weight.
+pub fn key() -> Style {
+    Style::default().add_modifier(Modifier::BOLD)
+}
+
+/// The `|` between hints: chrome-dark, quieter than the hints themselves.
+pub fn separator() -> Style {
+    Style::default().fg(BORDER)
 }
 
 /// The status word and its dot, by state.
