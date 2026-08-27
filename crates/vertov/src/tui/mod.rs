@@ -44,6 +44,11 @@ pub fn run(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
         if w > 10 && h > 20 {
             graphics.cell_size = (w / 2, h / 2);
         }
+        // One step heavier than the reduced cell would derive: the raster
+        // is scaled up to the panel, and a hairline scaled up reads thin —
+        // chart lines should keep the weight they had at native density.
+        let derived = (usize::from(graphics.cell_size.1) + 8) / 16;
+        graphics.stroke = Some((derived + 1).min(4) as u8);
     }
 
     let mut terminal = ratatui::init();

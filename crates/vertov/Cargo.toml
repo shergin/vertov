@@ -11,11 +11,11 @@ categories = ["command-line-utilities", "visualization"]
 
 [dependencies]
 vertov-model = { path = "../vertov-model", version = "0.1" }
-# 1.18.4 minimum: bounded deflate blocks (1.18.1's single-block streams
-# crash Ghostty 1.3's Zig <= 0.15 inflater), the fast encode path, and
-# kitty placement rectangles (c=/r=) — what lets the standard-density
-# default scale up to the panel instead of shrinking into its corner.
-malevich = { version = "1.18.4", features = ["ratatui", "pixel"] }
+# 1.18.6 minimum: bounded deflate blocks (1.18.1's single-block streams
+# crash Ghostty 1.3's Zig <= 0.15 inflater), the fast encode path, kitty
+# placement rectangles (c=/r=) for the standard-density default, and the
+# stroke override that keeps chart lines at native ink weight.
+malevich = { version = "1.18.6", features = ["ratatui", "pixel"] }
 ratatui = "0.30"
 crossterm = "0.29"
 # lexopt over clap, kaz's precedent: ~0 extra deps, no proc-macro tree, and
