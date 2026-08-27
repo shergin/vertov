@@ -262,7 +262,20 @@ fn parse_args() -> Result<Option<Args>, lexopt::Error> {
 /// Opens the project, warms it from the summary cache unless `--no-cache`,
 /// refreshes once, and saves the cache back (best-effort — the cache is an
 /// accelerator, never a requirement).
+///
+/// A missing root is an error here: the one-shot commands answer "what is
+/// in this logdir now", so a typo'd path must not read as an empty project.
+/// (`tail` and the TUI keep their wait-for-the-trainer behavior.)
 fn load_project(args: &Args) -> std::io::Result<Project> {
+    if !std::path::Path::new(&args.logdir).exists() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            format!(
+                "logdir `{}` does not exist (tail and the TUI wait for one to appear)",
+                args.logdir
+            ),
+        ));
+    }
     let mut project = Project::new(&args.logdir);
     if !args.no_cache {
         project.load_cache();

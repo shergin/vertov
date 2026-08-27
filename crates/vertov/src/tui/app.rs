@@ -422,7 +422,8 @@ impl App {
     }
 
     /// The tag the chart draws: the cursor if it still exists, else the
-    /// first visible tag.
+    /// first tag mentioning "loss" (the researcher's default stare), else
+    /// the first visible tag.
     pub fn current_tag(&self) -> Option<String> {
         let tags = self.visible_tags();
         if let Some(cursor) = &self.scalars.cursor
@@ -430,7 +431,10 @@ impl App {
         {
             return Some(cursor.clone());
         }
-        tags.first().cloned()
+        tags.iter()
+            .find(|tag| tag.contains("loss"))
+            .or_else(|| tags.first())
+            .cloned()
     }
 
     pub fn chart_options(&self) -> ChartOptions {
@@ -524,7 +528,14 @@ impl App {
                 KeyCode::Backspace => {
                     self.filter_mut().pop();
                 }
-                KeyCode::Char(ch) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                // Alt-modified characters are excluded too: over ssh, Esc
+                // followed quickly by a key arrives as Alt+key, and turning
+                // an attempted escape into filter text is the wrong guess.
+                KeyCode::Char(ch)
+                    if !key
+                        .modifiers
+                        .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+                {
                     self.filter_mut().push(ch);
                 }
                 _ => {}
@@ -624,7 +635,13 @@ impl App {
                 let next = position.map_or(0, |p| p.saturating_sub(1));
                 self.distributions.cursor = tags.get(next).cloned();
             }
-            KeyCode::Esc => self.view = View::Runs,
+            KeyCode::Esc => {
+                if !self.distributions.filter.is_empty() {
+                    self.distributions.filter.clear();
+                } else {
+                    self.view = View::Runs;
+                }
+            }
             _ => {}
         }
     }
@@ -665,12 +682,24 @@ impl App {
             KeyCode::Char('s') => self.runs.sort = self.runs.sort.next(),
             KeyCode::Char('S') => self.runs.descending = !self.runs.descending,
             KeyCode::Enter => {
-                if self.runs.selected.is_empty()
-                    && let Some(cursor) = self.cursor_or_first(&names)
+                // Open the cursor run — replacing a selection it isn't part
+                // of (pointing somewhere new means the old scope is over),
+                // but keeping a curated multi-selection the cursor is in.
+                if let Some(cursor) = self.cursor_or_first(&names)
+                    && !self.runs.selected.contains(&cursor)
                 {
+                    self.runs.selected.clear();
                     self.runs.selected.insert(cursor);
                 }
                 self.view = View::Scalars;
+            }
+            KeyCode::Esc => {
+                // Progressive escape: selection first, then the filter.
+                if !self.runs.selected.is_empty() {
+                    self.runs.selected.clear();
+                } else {
+                    self.runs.filter.clear();
+                }
             }
             _ => {}
         }
@@ -703,10 +732,15 @@ impl App {
             KeyCode::Char('g') => self.scalars.cursor = tags.first().cloned(),
             KeyCode::Char('G') => self.scalars.cursor = tags.last().cloned(),
             KeyCode::Char('s') => {
-                self.scalars.smooth = (self.scalars.smooth - 0.1).max(0.0);
+                // Snap to the 0.1 grid: repeated float subtraction would
+                // otherwise leave a ~1e-17 residue that keeps smoothing
+                // "on" while the title says 0.0.
+                self.scalars.smooth =
+                    ((self.scalars.smooth * 10.0).round() - 1.0).max(0.0) / 10.0;
             }
             KeyCode::Char('S') => {
-                self.scalars.smooth = (self.scalars.smooth + 0.1).min(0.9);
+                self.scalars.smooth =
+                    ((self.scalars.smooth * 10.0).round() + 1.0).min(9.0) / 10.0;
             }
             KeyCode::Char('x') => {
                 self.scalars.x_axis = match self.scalars.x_axis {
@@ -718,7 +752,15 @@ impl App {
             }
             KeyCode::Char('L') => self.scalars.log_y = !self.scalars.log_y,
             KeyCode::Char('v') => self.scalars.show_ghosts = !self.scalars.show_ghosts,
-            KeyCode::Esc => self.view = View::Runs,
+            KeyCode::Esc => {
+                // Progressive escape: a committed tag filter first, then
+                // back to the runs table.
+                if !self.scalars.filter.is_empty() {
+                    self.scalars.filter.clear();
+                } else {
+                    self.view = View::Runs;
+                }
+            }
             _ => {}
         }
     }

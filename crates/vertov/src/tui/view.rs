@@ -202,7 +202,7 @@ fn draw_scalars(frame: &mut Frame, app: &App, area: Rect) -> Vec<PixelPanel> {
         }
         None => {
             frame.render_widget(
-                Paragraph::new("no scalar tags match")
+                Paragraph::new(empty_hint(app))
                     .block(Block::default().borders(Borders::ALL)),
                 right,
             );
@@ -217,7 +217,7 @@ fn draw_compare(frame: &mut Frame, app: &App, area: Rect) -> Vec<PixelPanel> {
     let (tags, runs) = app.compare_scope();
     if tags.is_empty() {
         frame.render_widget(
-            Paragraph::new("no scalar tags match").block(Block::default().borders(Borders::ALL)),
+            Paragraph::new(empty_hint(app)).block(Block::default().borders(Borders::ALL)),
             area,
         );
         return Vec::new();
@@ -289,7 +289,17 @@ fn draw_hparams(frame: &mut Frame, app: &App, area: Rect) {
         .iter()
         .enumerate()
         .map(|(index, row)| {
-            let mut cells: Vec<String> = row.iter().map(|cell| cell.text()).collect();
+            // On screen, floats truncate to significant digits (never
+            // rounded); the CSV export keeps full precision.
+            let mut cells: Vec<String> = row
+                .iter()
+                .map(|cell| match cell {
+                    crate::tui::app::HparamCell::Number(value) => {
+                        crate::table::fmt_sig(*value, 6)
+                    }
+                    other => other.text(),
+                })
+                .collect();
             if let Some(first) = cells.first_mut() {
                 let marker = if app.runs.selected.contains(&first.clone()) {
                     "▸"
@@ -380,7 +390,7 @@ fn draw_distributions(frame: &mut Frame, app: &App, area: Rect) -> Vec<PixelPane
         }
         None => {
             frame.render_widget(
-                Paragraph::new("no histogram series match")
+                Paragraph::new(empty_hint(app))
                     .block(Block::default().borders(Borders::ALL)),
                 right,
             );
@@ -435,6 +445,30 @@ fn chart_title(app: &App, tag: &str, data: &ChartData) -> String {
     title
 }
 
+/// The empty-state line: says *why* nothing is drawn when filters, the
+/// working set, or a selection narrow the scope, instead of a bare
+/// "no match".
+fn empty_hint(app: &App) -> String {
+    let mut reasons = Vec::new();
+    if !app.runs.filter.is_empty() {
+        reasons.push("the runs filter");
+    }
+    if app.working_set.is_some() {
+        reasons.push("the working set (U resets)");
+    }
+    if !app.runs.selected.is_empty() {
+        reasons.push("the selection (Esc in runs clears)");
+    }
+    if reasons.is_empty() {
+        "no matching series".to_owned()
+    } else {
+        format!(
+            "no matching series — {} may be hiding runs",
+            reasons.join(", ")
+        )
+    }
+}
+
 fn panel_title(name: &str, filter: &str, editing: bool) -> String {
     if editing {
         format!("{name} · /{filter}▏")
@@ -446,17 +480,9 @@ fn panel_title(name: &str, filter: &str, editing: bool) -> String {
 }
 
 fn draw_status(frame: &mut Frame, app: &App, area: Rect) {
-    let mut left = format!(
-        "vertov · {} · {} runs",
-        app.project.root().display(),
-        app.project.runs.len()
-    );
-    if app.project.dropped_records > 0 {
-        left.push_str(&format!(" · {} records lost", app.project.dropped_records));
-    }
-    if app.project.dead_files > 0 {
-        left.push_str(&format!(" · {} dead files", app.project.dead_files));
-    }
+    // The state must always be visible: it renders right-aligned first, and
+    // the left content truncates to what remains — a long root path may
+    // never push "paused" off the screen.
     let state = if app.paused {
         "paused".to_owned()
     } else {
@@ -467,20 +493,42 @@ fn draw_status(frame: &mut Frame, app: &App, area: Rect) {
             "live".to_owned()
         }
     };
-    let line = match &app.message {
-        Some(message) => Line::from(vec![
-            Span::raw(message.clone()),
-            Span::raw("  ·  "),
-            Span::styled(state, Style::default().fg(Color::DarkGray)),
-        ]),
-        None => Line::from(vec![
-            Span::raw(left),
-            Span::raw("  ·  "),
-            Span::raw(state),
-            Span::styled("  ·  ? help", Style::default().fg(Color::DarkGray)),
-        ]),
+    let right = format!("{state}  ·  ? help");
+    let mut left = match &app.message {
+        Some(message) => message.clone(),
+        None => {
+            let mut left = format!(
+                "vertov · {} · {} runs",
+                app.project.root().display(),
+                app.project.runs.len()
+            );
+            if app.project.dropped_records > 0 {
+                left.push_str(&format!(" · {} records lost", app.project.dropped_records));
+            }
+            if app.project.dead_files > 0 {
+                left.push_str(&format!(" · {} dead files", app.project.dead_files));
+            }
+            left
+        }
     };
-    frame.render_widget(Paragraph::new(line), area);
+    let budget = (area.width as usize).saturating_sub(right.chars().count() + 2);
+    if left.chars().count() > budget {
+        left = format!(
+            "…{}",
+            left.chars()
+                .skip(left.chars().count() - budget.saturating_sub(1))
+                .collect::<String>()
+        );
+    }
+    frame.render_widget(Paragraph::new(left), area);
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            right,
+            Style::default().fg(Color::DarkGray),
+        )))
+        .alignment(ratatui::layout::Alignment::Right),
+        area,
+    );
 }
 
 fn draw_help(frame: &mut Frame, area: Rect) {
@@ -496,10 +544,12 @@ fn draw_help(frame: &mut Frame, area: Rect) {
   runs+hparams: j/k move · space select for overlay · Enter open scalars
                 s sort column · S reverse
                 / takes a predicate too: lr > 1e-3 and status == active
+                Esc clears selection, then the filter
   scalars:      j/k move tag (fuzzy /) · s/S smoothing -/+ · L log-y
                 x cycle x axis: step/wall/relative/tokens · v ghost tails
-                Esc back to runs (compare shares these keys)
-  distributions: j/k move histogram tag · Esc back to runs";
+                Esc clears the tag filter, then goes back to runs
+                (compare shares these keys)
+  distributions: j/k move histogram tag · Esc filter, then back";
     let lines = text.lines().count() as u16 + 2;
     let width = 64.min(area.width);
     let popup = Rect {

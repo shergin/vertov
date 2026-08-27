@@ -52,7 +52,9 @@ impl Table {
     }
 
     fn render_text(&self) -> String {
-        let mut widths: Vec<usize> = self.columns.iter().map(String::len).collect();
+        // Widths in characters, not bytes: non-ASCII run names would
+        // otherwise blow the column out.
+        let mut widths: Vec<usize> = self.columns.iter().map(|c| c.chars().count()).collect();
         let rendered: Vec<Vec<String>> = self
             .rows
             .iter()
@@ -60,7 +62,7 @@ impl Table {
             .collect();
         for row in &rendered {
             for (index, cell) in row.iter().enumerate() {
-                widths[index] = widths[index].max(cell.len());
+                widths[index] = widths[index].max(cell.chars().count());
             }
         }
         // Numeric columns right-align so magnitudes line up.
@@ -188,7 +190,7 @@ fn json_string(text: &str) -> String {
     out
 }
 
-/// `92s` / `4m05s` / `2h11m` — wall-clock spans, timezone-free.
+/// `92s` / `4m05s` / `2h11m` / `54d13h` — wall-clock spans, timezone-free.
 pub fn fmt_duration(seconds: f64) -> String {
     if !seconds.is_finite() || seconds < 0.0 {
         return String::new();
@@ -198,9 +200,60 @@ pub fn fmt_duration(seconds: f64) -> String {
         format!("{total}s")
     } else if total < 3600 {
         format!("{}m{:02}s", total / 60, total % 60)
-    } else {
+    } else if total < 48 * 3600 {
         format!("{}h{:02}m", total / 3600, (total % 3600) / 60)
+    } else {
+        format!("{}d{:02}h", total / 86_400, (total % 86_400) / 3600)
     }
+}
+
+/// A float truncated to about `digits` significant digits — truncated,
+/// never rounded: `0.9999999` must not become `1.000000`. Integer digits
+/// are never cut (that would change the magnitude); only the fraction
+/// shortens. For screen cells; data exports keep full precision.
+pub fn fmt_sig(value: f64, digits: usize) -> String {
+    let full = value.to_string();
+    if !value.is_finite() {
+        return full;
+    }
+    // Rust's f64 Display never emits scientific notation, so the string is
+    // always sign + integer digits + optional fraction.
+    truncate_fraction(&full, digits)
+}
+
+fn truncate_fraction(text: &str, digits: usize) -> String {
+    let Some(dot) = text.find('.') else {
+        return text.to_owned();
+    };
+    let integer = &text[..dot];
+    let integer_significant = integer
+        .chars()
+        .filter(char::is_ascii_digit)
+        .skip_while(|&ch| ch == '0')
+        .count();
+    let mut budget = digits.saturating_sub(integer_significant);
+    if budget == 0 {
+        return integer.to_owned();
+    }
+    let mut kept = String::from(integer);
+    kept.push('.');
+    let mut significant_started = integer_significant > 0;
+    for ch in text[dot + 1..].chars() {
+        kept.push(ch);
+        if ch != '0' {
+            significant_started = true;
+        }
+        if significant_started {
+            budget -= 1;
+            if budget == 0 {
+                break;
+            }
+        }
+    }
+    if kept.ends_with('.') {
+        kept.pop();
+    }
+    kept
 }
 
 #[cfg(test)]
@@ -248,5 +301,34 @@ mod tests {
         assert_eq!(fmt_duration(45.0), "45s");
         assert_eq!(fmt_duration(245.0), "4m05s");
         assert_eq!(fmt_duration(7890.0), "2h11m");
+        assert_eq!(fmt_duration(4_712_400.0), "54d13h");
+    }
+
+    #[test]
+    fn text_widths_count_chars_not_bytes() {
+        let table = Table {
+            columns: vec!["run".into(), "n".into()],
+            rows: vec![
+                vec![Cell::Text("метрики".into()), Cell::Int(1)],
+                vec![Cell::Text("ascii".into()), Cell::Int(2)],
+            ],
+        };
+        assert_eq!(
+            table.render(Format::Text),
+            "run      n\nметрики  1\nascii    2\n"
+        );
+    }
+
+    #[test]
+    fn significant_truncation_never_rounds() {
+        assert_eq!(fmt_sig(0.9999999, 5), "0.99999");
+        assert_eq!(fmt_sig(0.916704475879, 5), "0.91670");
+        assert_eq!(fmt_sig(487424.0, 5), "487424");
+        // Integer digits are never cut — that would change the magnitude.
+        assert_eq!(fmt_sig(487424.75, 5), "487424");
+        assert_eq!(fmt_sig(-0.0001234567, 4), "-0.0001234");
+        assert_eq!(fmt_sig(1.5, 5), "1.5");
+        assert_eq!(fmt_sig(f64::NAN, 5), "NaN");
+        assert_eq!(fmt_sig(1.23456789e-7, 4), "0.0000001234");
     }
 }
