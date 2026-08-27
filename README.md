@@ -14,11 +14,28 @@ vertov export runs/ --csv     # escape hatch: flat runs × (params + metrics)
 Early days. The vision and its rules live in [docs/vision.md](docs/vision.md);
 each principle is argued in [docs/principles/](docs/principles/).
 
+## Format support
+
+| Backend | Reads | Live tail |
+|---|---|---|
+| **tfevents** (PyTorch `SummaryWriter`, Lightning, HF Trainer, Keras, …) | scalars (TF1+TF2), histograms, images, text, hparams | ✓ |
+| **dvclive** | `plots/metrics/*.tsv` histories, `params.yaml` | ✓ |
+| **MLflow file store** | `mlruns/**/metrics/*` lines, params, `meta.yaml` names | ✓ |
+| **wandb offline** | `run-*.wandb` history, config, exit status | ✓ |
+
+Mixed roots just work: every directory declares its own format, and every
+backend normalizes into the same runs, series, exact summaries, and restart
+semantics — the TUI is backend-blind. Trackio is next; Aim, ClearML, Comet,
+and Neptune are out of scope (internal or server-based formats).
+
 ## Workspace
 
 - [`crates/tfevents`](crates/tfevents) — standalone TFRecord + Event decoding:
   zero dependencies, hand-rolled varint/CRC32C, truncation-tolerant, resumable,
   fuzzed.
+- [`crates/vertov-formats`](crates/vertov-formats) — parsers for the other
+  formats: dvclive TSVs and params, MLflow file-store lines and meta, wandb's
+  LevelDB-log framing and record protos.
 - [`crates/vertov-model`](crates/vertov-model) — the unified data model:
   catalog, exact mergeable summaries for every series, restart segments with
   RustBoard's preemption semantics (ghost tails kept), the reload loop, and an
