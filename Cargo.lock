@@ -793,9 +793,9 @@ dependencies = [
 
 [[package]]
 name = "malevich"
-version = "1.18.0"
+version = "1.18.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ad6500214e6ff071d0f39477c2264a8fe69516cfd2bd04254af6b1d74f487473"
+checksum = "3d9c6ee282cc82aa05c5cc68a83b63f5ae88285d0fe4bb8f9d3d4a770ffeadfa"
 dependencies = [
  "ratatui-core",
  "rustix",
