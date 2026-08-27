@@ -30,6 +30,21 @@ pub fn run(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
     app.graphics = args
         .pixels
         .graphics(|| malevich::pixel::Capabilities::detect_for(&std::io::stdout()));
+    // Standard density unless --sharp: a Retina cell is 2× per axis, and
+    // the raster costs by area at every stage — encode, pty transport,
+    // the terminal's inflate and texture upload. The placement rectangle
+    // (kitty c=/r=, iTerm2 width/height) scales the image back over the
+    // full panel, so charts keep their size and lose only fine
+    // antialiasing. Sixel has no placement scaling, so it stays native.
+    if let Some(graphics) = &mut app.graphics
+        && !args.sharp
+        && graphics.protocol != malevich::pixel::Protocol::Sixel
+    {
+        let (w, h) = graphics.cell_size;
+        if w > 10 && h > 20 {
+            graphics.cell_size = (w / 2, h / 2);
+        }
+    }
 
     let mut terminal = ratatui::init();
     let result = event_loop(&mut terminal, &mut app);
@@ -93,14 +108,17 @@ fn event_loop(
         } else if let Some(graphics) = &app.graphics
             && emit_needed
         {
-            // Panel count can shrink (compare grid resize): clear kitty
-            // placements before re-emitting so orphans never linger.
-            if image_on_screen {
-                delete_kitty_images(app)?;
-            }
-            for panel in &panels {
-                emit_pixels(panel, graphics)?;
-            }
+            // Encode first, swap second: the expensive encode runs while
+            // the previous image is still on screen, and the delete +
+            // reprint ride one synchronized batch — the panel replaces
+            // instead of blinking through a blank gap. (The delete exists
+            // because panel count can shrink — compare grid resize — and
+            // kitty placements would otherwise linger as orphans.)
+            let blocks: Vec<(ratatui::layout::Rect, String)> = panels
+                .iter()
+                .map(|panel| (panel.area(), encode_pixels(panel, graphics)))
+                .collect();
+            swap_pixels(app, image_on_screen, &blocks)?;
             emit_needed = false;
             image_on_screen = true;
         }
@@ -139,12 +157,10 @@ fn event_loop(
     }
 }
 
-/// Prints the chart panel as a real image: cursor to the panel's top row,
-/// then malevich's absolute-column block — chrome as text, plot rectangle
-/// as pixels (§5.6: emit after the frame).
-fn emit_pixels(panel: &view::PixelPanel, graphics: &malevich::pixel::Graphics) -> std::io::Result<()> {
-    use crossterm::{cursor::MoveTo, style::Print};
-    use std::io::Write as _;
+/// Renders the chart panel to an image block: malevich's absolute-column
+/// hybrid — chrome as text, plot rectangle as pixels (§5.6: emit after
+/// the frame). Pure encoding; nothing touches the terminal.
+fn encode_pixels(panel: &view::PixelPanel, graphics: &malevich::pixel::Graphics) -> String {
     let area = panel.area();
     let frame = malevich::Frame {
         width: area.width as usize,
@@ -153,11 +169,36 @@ fn emit_pixels(panel: &view::PixelPanel, graphics: &malevich::pixel::Graphics) -
         color: malevich::ColorMode::TrueColor,
         theme: malevich::Theme::DARK,
     };
-    let block = panel
+    panel
         .plot()
-        .render_pixels_at(&frame, graphics, area.x as usize);
+        .render_pixels_at(&frame, graphics, area.x as usize)
+}
+
+/// Replaces the on-screen images with freshly encoded blocks in one
+/// synchronized write (DEC 2026): the terminal presents the old charts
+/// until the whole swap has landed, so redraws never flash blank.
+fn swap_pixels(
+    app: &App,
+    image_on_screen: bool,
+    blocks: &[(ratatui::layout::Rect, String)],
+) -> std::io::Result<()> {
+    use crossterm::{
+        cursor::MoveTo,
+        style::Print,
+        terminal::{BeginSynchronizedUpdate, EndSynchronizedUpdate},
+    };
+    use std::io::Write as _;
     let mut out = std::io::stdout();
-    crossterm::queue!(out, MoveTo(area.x, area.y), Print(block))?;
+    crossterm::queue!(out, BeginSynchronizedUpdate)?;
+    if image_on_screen
+        && app.graphics.map(|graphics| graphics.protocol) == Some(malevich::pixel::Protocol::Kitty)
+    {
+        crossterm::queue!(out, Print("\x1b_Ga=d,d=A\x1b\\"))?;
+    }
+    for (area, block) in blocks {
+        crossterm::queue!(out, MoveTo(area.x, area.y), Print(block))?;
+    }
+    crossterm::queue!(out, EndSynchronizedUpdate)?;
     out.flush()
 }
 

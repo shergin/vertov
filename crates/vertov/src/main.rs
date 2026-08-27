@@ -71,6 +71,10 @@ Options:
                         or iterm2: force that protocol (show and the TUI) —
                         for terminals the probe misses, and for piping
                         pixel output to files or decoders.
+      --sharp           Render charts at native (e.g. Retina) pixel density.
+                        Default is standard density: the terminal scales the
+                        image to the panel, charts redraw much faster, and
+                        only fine antialiasing differs.
   -h, --help            This help.
 
 Examples:
@@ -92,6 +96,7 @@ struct Args {
     height: Option<usize>,
     no_cache: bool,
     pixels: PixelMode,
+    sharp: bool,
     show_ghosts: bool,
     tokens_tag: Option<String>,
 }
@@ -171,6 +176,7 @@ fn parse_args() -> Result<Option<Args>, lexopt::Error> {
     let mut height = None;
     let mut no_cache = false;
     let mut pixels = PixelMode::Auto;
+    let mut sharp = false;
     let mut show_ghosts = false;
     let mut tokens_tag = None;
 
@@ -217,6 +223,7 @@ fn parse_args() -> Result<Option<Args>, lexopt::Error> {
             Long("width") => width = Some(parser.value()?.parse()?),
             Long("height") => height = Some(parser.value()?.parse()?),
             Long("no-cache") => no_cache = true,
+            Long("sharp") => sharp = true,
             Long("ghosts") => show_ghosts = true,
             Long("pixels") => {
                 use malevich::pixel::Protocol;
@@ -297,6 +304,7 @@ fn parse_args() -> Result<Option<Args>, lexopt::Error> {
         height,
         no_cache,
         pixels,
+        sharp,
         show_ghosts,
         tokens_tag,
     }))
