@@ -1,0 +1,8 @@
+[package]
+name = "vertov-formats"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Parsers for the non-tfevents training-log formats vertov reads: dvclive, MLflow file store"
