@@ -3,6 +3,7 @@
 //! events to them (deterministic core, effectful shell).
 
 pub mod app;
+pub mod theme;
 pub mod view;
 
 use std::time::{Duration, Instant};
@@ -21,6 +22,8 @@ pub fn run(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
     }
     project.refresh()?;
     let mut app = App::new(project, args.interval, &args.tag);
+    // Land with the cursor on the first run, not in a cursorless limbo.
+    app.runs.cursor = app.project.runs.keys().next().cloned();
     // Probe before raw mode (§5.6): the capability query reads terminal
     // replies, which a raw-mode event loop would swallow as input. The
     // result is cached for the process. A forced protocol skips the probe.

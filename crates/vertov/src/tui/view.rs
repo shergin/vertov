@@ -4,7 +4,7 @@
 
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{
     Block, Borders, Clear, List, ListItem, ListState, Paragraph, Row, Table, TableState,
@@ -13,6 +13,7 @@ use ratatui::widgets::{
 use crate::chart::{ChartData, DistData};
 use crate::table::fmt_duration;
 use crate::tui::app::{App, View};
+use crate::tui::theme;
 
 /// A chart panel reserved for pixel graphics this frame: the cell diff left
 /// its rect untouched (skip cells), and the caller emits this after the
@@ -63,8 +64,13 @@ impl PixelPanel {
 }
 
 pub fn draw(frame: &mut Frame, app: &App) -> Vec<PixelPanel> {
-    let [body, status] =
-        Layout::vertical([Constraint::Fill(1), Constraint::Length(1)]).areas(frame.area());
+    let [header, body, status] = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Fill(1),
+        Constraint::Length(1),
+    ])
+    .areas(frame.area());
+    draw_header(frame, app, header);
     let panels = match app.view {
         View::Runs => {
             draw_runs(frame, app, body);
@@ -85,7 +91,52 @@ pub fn draw(frame: &mut Frame, app: &App) -> Vec<PixelPanel> {
     panels
 }
 
+/// The header: brand mark, the view tabs (the accent shows where you are),
+/// and the run count on the right.
+fn draw_header(frame: &mut Frame, app: &App, area: Rect) {
+    let mut spans = vec![
+        Span::styled("▌ ", theme::accent()),
+        Span::styled("vertov", theme::header()),
+        Span::raw("   "),
+    ];
+    for (view, key, label) in [
+        (View::Runs, "1", "runs"),
+        (View::Scalars, "2", "scalars"),
+        (View::Compare, "3", "compare"),
+        (View::Hparams, "4", "hparams"),
+        (View::Distributions, "5", "dists"),
+    ] {
+        let active = app.view == view;
+        spans.push(Span::styled(
+            format!("{key} "),
+            if active { theme::accent() } else { theme::dim() },
+        ));
+        spans.push(Span::styled(
+            format!("{label}  "),
+            if active {
+                theme::title_focus()
+            } else {
+                theme::dim()
+            },
+        ));
+    }
+    frame.render_widget(Paragraph::new(Line::from(spans)), area);
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            format!("{} runs ", app.project.runs.len()),
+            theme::dim(),
+        )))
+        .alignment(ratatui::layout::Alignment::Right),
+        area,
+    );
+}
+
 fn draw_runs(frame: &mut Frame, app: &App, area: Rect) {
+    // Narrow terminals keep the columns that matter: trend, then duration,
+    // then step yield before the run name ever starves.
+    let show_step = area.width >= 70;
+    let show_duration = area.width >= 84;
+    let show_trend = area.width >= 100;
     let rows = app.run_rows();
     let cursor = app
         .runs
@@ -96,70 +147,127 @@ fn draw_runs(frame: &mut Frame, app: &App, area: Rect) {
         .iter()
         .enumerate()
         .map(|(index, row)| {
-            let marker = if app.runs.selected.contains(&row.name) {
-                "▸"
+            let selected = app.runs.selected.contains(&row.name);
+            let marker = Span::styled(if selected { "▌" } else { " " }, theme::accent());
+            let (dot, dot_style) = theme::status(row.status);
+            let restarts = if row.restarts > 0 {
+                Span::styled(row.restarts.to_string(), theme::accent())
             } else {
-                " "
+                Span::styled("0".to_owned(), theme::dim())
             };
-            let style = if Some(index) == cursor {
-                Style::default().add_modifier(Modifier::REVERSED)
-            } else {
-                Style::default()
-            };
-            Row::new(vec![
-                format!("{marker}{}", row.name),
-                row.status.to_owned(),
-                row.series.to_string(),
-                row.points.to_string(),
-                row.restarts.to_string(),
-                row.step.map(|step| step.to_string()).unwrap_or_default(),
-                row.duration.map(fmt_duration).unwrap_or_default(),
-            ])
-            .style(style)
+            let mut cells = vec![
+                Line::from(vec![marker, Span::raw(row.name.clone())]),
+                Line::from(vec![
+                    Span::styled(format!("{dot} "), dot_style),
+                    Span::raw(row.status),
+                ]),
+                Line::raw(row.series.to_string()),
+                Line::raw(row.points.to_string()),
+                Line::from(restarts),
+            ];
+            if show_step {
+                cells.push(Line::raw(
+                    row.step.map(|step| step.to_string()).unwrap_or_default(),
+                ));
+            }
+            if show_duration {
+                cells.push(Line::from(Span::styled(
+                    row.duration.map(fmt_duration).unwrap_or_default(),
+                    theme::dim(),
+                )));
+            }
+            if show_trend {
+                cells.push(Line::from(Span::styled(
+                    row.spark.clone().unwrap_or_default(),
+                    theme::dim(),
+                )));
+            }
+            let mut table_row = Row::new(cells);
+            if Some(index) == cursor {
+                table_row = table_row.style(theme::cursor_row());
+            }
+            table_row
         })
         .collect();
 
-    let sort_marker = |label: &str| {
+    let sort_cell = |label: &str| {
         if label == app.runs.sort.label() {
-            format!("{label}{}", if app.runs.descending { "▼" } else { "▲" })
+            Line::from(vec![
+                Span::styled(label.to_owned(), theme::header()),
+                Span::styled(
+                    if app.runs.descending { "▼" } else { "▲" },
+                    theme::accent(),
+                ),
+            ])
         } else {
-            label.to_owned()
+            Line::from(Span::styled(label.to_owned(), theme::dim()))
         }
     };
-    let header = Row::new(vec![
-        sort_marker("run"),
-        "status".to_owned(),
-        "series".to_owned(),
-        sort_marker("points"),
-        sort_marker("restarts"),
-        sort_marker("step"),
-        sort_marker("duration"),
-    ])
-    .style(Style::default().add_modifier(Modifier::BOLD));
+    let mut header_cells = vec![
+        sort_cell("run"),
+        Line::from(Span::styled("status", theme::dim())),
+        Line::from(Span::styled("series", theme::dim())),
+        sort_cell("points"),
+        sort_cell("restarts"),
+    ];
+    let mut constraints = vec![
+        Constraint::Fill(2),
+        Constraint::Length(9),
+        Constraint::Length(6),
+        Constraint::Length(8),
+        Constraint::Length(8),
+    ];
+    if show_step {
+        header_cells.push(sort_cell("step"));
+        constraints.push(Constraint::Length(8));
+    }
+    if show_duration {
+        header_cells.push(sort_cell("duration"));
+        constraints.push(Constraint::Length(8));
+    }
+    if show_trend {
+        header_cells.push(Line::from(Span::styled("trend", theme::dim())));
+        constraints.push(Constraint::Length(12));
+    }
+    let header = Row::new(header_cells);
 
     let mut title = panel_title("runs", &app.runs.filter, app.runs.editing_filter);
     if let Some(kept) = &app.working_set {
         use std::fmt::Write as _;
         let _ = write!(title, " · keeping {} (U resets)", kept.len());
     }
-    let table = Table::new(
-        table_rows,
-        [
-            Constraint::Fill(2),
-            Constraint::Length(6),
-            Constraint::Length(6),
-            Constraint::Length(8),
-            Constraint::Length(8),
-            Constraint::Length(8),
-            Constraint::Length(8),
-        ],
-    )
-    .header(header)
-    .block(Block::default().borders(Borders::ALL).title(title));
+    let table = Table::new(table_rows, constraints)
+        .header(header)
+        .block(panel_block(&title, app.runs.editing_filter));
     // Stateful render purely for scrolling: the state is rebuilt from the
     // cursor every frame, so the table follows it below the fold.
     let mut state = TableState::default().with_selected(cursor);
     frame.render_stateful_widget(table, area, &mut state);
+}
+
+/// A rounded panel frame: quiet by default, accent-titled while its filter
+/// is being edited (the moment the panel has your keyboard).
+fn panel_block(title: &str, focus: bool) -> Block<'static> {
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(ratatui::widgets::BorderType::Rounded)
+        .border_style(if focus {
+            theme::border_focus()
+        } else {
+            theme::border()
+        });
+    if title.is_empty() {
+        block
+    } else {
+        block.title(Span::styled(
+            format!(" {title} "),
+            if focus {
+                theme::title_focus()
+            } else {
+                theme::title()
+            },
+        ))
+    }
 }
 
 fn draw_scalars(frame: &mut Frame, app: &App, area: Rect) -> Vec<PixelPanel> {
@@ -172,7 +280,7 @@ fn draw_scalars(frame: &mut Frame, app: &App, area: Rect) -> Vec<PixelPanel> {
         .iter()
         .map(|tag| {
             let style = if Some(tag) == current.as_ref() {
-                Style::default().add_modifier(Modifier::REVERSED)
+                theme::cursor_row()
             } else {
                 Style::default()
             };
@@ -183,7 +291,7 @@ fn draw_scalars(frame: &mut Frame, app: &App, area: Rect) -> Vec<PixelPanel> {
     let mut state = ListState::default()
         .with_selected(tags.iter().position(|tag| Some(tag) == current.as_ref()));
     frame.render_stateful_widget(
-        List::new(items).block(Block::default().borders(Borders::ALL).title(title)),
+        List::new(items).block(panel_block(&title, app.scalars.editing_filter)),
         left,
         &mut state,
     );
@@ -210,8 +318,8 @@ fn draw_scalars(frame: &mut Frame, app: &App, area: Rect) -> Vec<PixelPanel> {
         }
         None => {
             frame.render_widget(
-                Paragraph::new(empty_hint(app))
-                    .block(Block::default().borders(Borders::ALL)),
+                Paragraph::new(Span::styled(empty_hint(app), theme::dim()))
+                    .block(panel_block("", false)),
                 right,
             );
         }
@@ -225,7 +333,7 @@ fn draw_compare(frame: &mut Frame, app: &App, area: Rect) -> Vec<PixelPanel> {
     let (tags, runs) = app.compare_scope();
     if tags.is_empty() {
         frame.render_widget(
-            Paragraph::new(empty_hint(app)).block(Block::default().borders(Borders::ALL)),
+            Paragraph::new(Span::styled(empty_hint(app), theme::dim())).block(panel_block("", false)),
             area,
         );
         return Vec::new();
@@ -341,7 +449,7 @@ fn draw_hparams(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_stateful_widget(
         Table::new(table_rows, constraints)
             .header(header)
-            .block(Block::default().borders(Borders::ALL).title(title)),
+            .block(panel_block(&title, app.runs.editing_filter)),
         area,
         &mut state,
     );
@@ -359,7 +467,7 @@ fn draw_distributions(frame: &mut Frame, app: &App, area: Rect) -> Vec<PixelPane
         .iter()
         .map(|tag| {
             let style = if Some(tag) == current_tag.as_ref() {
-                Style::default().add_modifier(Modifier::REVERSED)
+                theme::cursor_row()
             } else {
                 Style::default()
             };
@@ -374,7 +482,7 @@ fn draw_distributions(frame: &mut Frame, app: &App, area: Rect) -> Vec<PixelPane
     let mut state = ListState::default()
         .with_selected(tags.iter().position(|tag| Some(tag) == current_tag.as_ref()));
     frame.render_stateful_widget(
-        List::new(items).block(Block::default().borders(Borders::ALL).title(title)),
+        List::new(items).block(panel_block(&title, app.distributions.editing_filter)),
         left,
         &mut state,
     );
@@ -403,8 +511,8 @@ fn draw_distributions(frame: &mut Frame, app: &App, area: Rect) -> Vec<PixelPane
         }
         None => {
             frame.render_widget(
-                Paragraph::new(empty_hint(app))
-                    .block(Block::default().borders(Borders::ALL)),
+                Paragraph::new(Span::styled(empty_hint(app), theme::dim()))
+                    .block(panel_block("", false)),
                 right,
             );
         }
@@ -492,90 +600,132 @@ fn panel_title(name: &str, filter: &str, editing: bool) -> String {
     }
 }
 
+/// Per-view key hints for the footer: `(key, what it does)`.
+fn hints(view: View) -> &'static [(&'static str, &'static str)] {
+    match view {
+        View::Runs => &[
+            ("enter", "open"),
+            ("space", "pick"),
+            ("/", "filter"),
+            ("s", "sort"),
+            ("K/X", "keep/drop"),
+            ("e", "export"),
+            ("?", "help"),
+        ],
+        View::Scalars => &[
+            ("j/k", "tag"),
+            ("s/S", "smooth"),
+            ("L", "log"),
+            ("x", "axis"),
+            ("v", "ghosts"),
+            ("e", "export"),
+            ("?", "help"),
+        ],
+        View::Compare => &[
+            ("/", "tags"),
+            ("s/S", "smooth"),
+            ("x", "axis"),
+            ("esc", "back"),
+            ("?", "help"),
+        ],
+        View::Hparams => &[
+            ("space", "pick"),
+            ("K/X", "keep/drop"),
+            ("U", "reset"),
+            ("e", "export"),
+            ("?", "help"),
+        ],
+        View::Distributions => &[
+            ("j/k", "tag"),
+            ("/", "filter"),
+            ("e", "export"),
+            ("?", "help"),
+        ],
+    }
+}
+
 fn draw_status(frame: &mut Frame, app: &App, area: Rect) {
-    // The state must always be visible: it renders right-aligned first, and
-    // the left content truncates to what remains — a long root path may
-    // never push "paused" off the screen.
-    let state = if app.paused {
-        "paused".to_owned()
+    // The state must always be visible: it renders right-aligned last over
+    // the hints, so nothing may ever push "paused" off the screen.
+    let (state, state_style) = if app.paused {
+        ("‖ paused".to_owned(), theme::dim())
     } else {
         let quiet = app.last_change.elapsed();
         if quiet > 2 * app.interval {
-            format!("stale {}s", quiet.as_secs())
+            (
+                format!("○ stale {}s", quiet.as_secs()),
+                Style::default().fg(theme::STALE),
+            )
         } else {
-            "live".to_owned()
+            ("● live".to_owned(), Style::default().fg(theme::LIVE))
         }
     };
-    let right = format!("{state}  ·  ? help");
-    let mut left = match &app.message {
-        Some(message) => message.clone(),
-        None => {
-            let mut left = format!(
-                "vertov · {} · {} runs",
-                app.project.root().display(),
-                app.project.runs.len()
-            );
-            if app.project.dropped_records > 0 {
-                left.push_str(&format!(" · {} records lost", app.project.dropped_records));
-            }
-            if app.project.dead_files > 0 {
-                left.push_str(&format!(" · {} dead files", app.project.dead_files));
-            }
-            left
-        }
-    };
-    let budget = (area.width as usize).saturating_sub(right.chars().count() + 2);
-    if left.chars().count() > budget {
-        left = format!(
-            "…{}",
-            left.chars()
-                .skip(left.chars().count() - budget.saturating_sub(1))
-                .collect::<String>()
-        );
+    let mut right_spans = Vec::new();
+    if app.project.dropped_records > 0 {
+        right_spans.push(Span::styled(
+            format!("{} lost  ", app.project.dropped_records),
+            Style::default().fg(theme::STALE),
+        ));
     }
+    if app.project.dead_files > 0 {
+        right_spans.push(Span::styled(
+            format!("{} dead  ", app.project.dead_files),
+            theme::accent(),
+        ));
+    }
+    right_spans.push(Span::styled(state, state_style));
+    right_spans.push(Span::raw(" "));
+
+    let left = match &app.message {
+        Some(message) => Line::from(Span::styled(message.clone(), theme::accent())),
+        None => {
+            let mut spans = vec![Span::raw(" ")];
+            for (key, what) in hints(app.view) {
+                spans.push(Span::styled(*key, theme::accent()));
+                spans.push(Span::styled(format!(" {what}   "), theme::dim()));
+            }
+            Line::from(spans)
+        }
+    };
     frame.render_widget(Paragraph::new(left), area);
     frame.render_widget(
-        Paragraph::new(Line::from(Span::styled(
-            right,
-            Style::default().fg(Color::DarkGray),
-        )))
-        .alignment(ratatui::layout::Alignment::Right),
+        Paragraph::new(Line::from(right_spans)).alignment(ratatui::layout::Alignment::Right),
         area,
     );
 }
 
 fn draw_help(frame: &mut Frame, area: Rect) {
-    let text = "\
-  q             quit
-  ?             this help (any key closes)
-  Tab 1-5       views: runs / scalars / compare / hparams / distributions
-  /             filter (Esc clears, Enter keeps)
-  K X U         keep / exclude selection in the working set · U resets
-  e             export current view as CSV, next to your shell
-  p             pause polling      r  refresh now
-
-  runs+hparams: j/k move · space select for overlay · Enter open scalars
-                s sort column · S reverse
-                / takes a predicate too: lr > 1e-3 and status == active
-                Esc clears selection, then the filter
-  scalars:      j/k move tag (fuzzy /) · s/S smoothing -/+ · L log-y
-                x cycle x axis: step/wall/relative/tokens · v ghost tails
-                Esc clears the tag filter, then goes back to runs
-                (compare shares these keys)
-  distributions: j/k move histogram tag · Esc filter, then back";
-    let lines = text.lines().count() as u16 + 2;
-    let width = 64.min(area.width);
+    const KEYS: &[(&str, &str)] = &[
+        ("q", "quit"),
+        ("?", "this help — any key closes"),
+        ("Tab · 1-5", "views: runs, scalars, compare, hparams, dists"),
+        ("/", "filter · a predicate works: lr > 1e-3 and status == active"),
+        ("Esc", "progressively: editor, selection, filter, back"),
+        ("K / X / U", "keep / exclude selection as working set / reset"),
+        ("e", "export this view as CSV, next to your shell"),
+        ("p · r", "pause polling · refresh now"),
+        ("", ""),
+        ("j k g G", "move · space picks runs for overlay · Enter opens"),
+        ("s / S", "runs: sort column, reverse · scalars: smoothing -/+"),
+        ("L · x · v", "log-y · x axis: step, wall, relative, tokens · ghosts"),
+    ];
+    let mut lines = vec![Line::raw("")];
+    for (key, what) in KEYS {
+        lines.push(Line::from(vec![
+            Span::styled(format!("  {key:>10}  "), theme::accent()),
+            Span::styled((*what).to_owned(), Style::default()),
+        ]));
+    }
+    let height = lines.len() as u16 + 3;
+    let width = 76.min(area.width);
     let popup = Rect {
         x: area.width.saturating_sub(width) / 2,
-        y: area.height.saturating_sub(lines) / 2,
+        y: area.height.saturating_sub(height) / 2,
         width,
-        height: lines.min(area.height),
+        height: height.min(area.height),
     };
     frame.render_widget(Clear, popup);
-    frame.render_widget(
-        Paragraph::new(text).block(Block::default().borders(Borders::ALL).title("keys")),
-        popup,
-    );
+    frame.render_widget(Paragraph::new(lines).block(panel_block("keys", true)), popup);
 }
 
 #[cfg(test)]
@@ -680,13 +830,13 @@ mod tests {
         app.runs.selected.insert("sgd".to_owned());
         let lines = snapshot(&app, 72, 8);
         let expected = [
-            "┌runs──────────────────────────────────────────────────────────────────┐",
-            "│run▲                 status series points   restarts step     duration│",
-            "│ adam                active 3      23       0        9        90s     │",
-            "│▸sgd                 active 1      8        0        7        70s     │",
+            "▌ vertov   1 runs  2 scalars  3 compare  4 hparams  5 dists      2 runs",
+            "╭ runs ────────────────────────────────────────────────────────────────╮",
+            "│run▲                       status    series points   restarts step    │",
+            "│ adam                      ● active  3      23       0        9       │",
+            "│▌sgd                       ● active  1      8        0        7       │",
             "│                                                                      │",
-            "│                                                                      │",
-            "└──────────────────────────────────────────────────────────────────────┘",
+            "╰──────────────────────────────────────────────────────────────────────╯",
         ];
         assert_eq!(lines, expected, "runs view drifted:\n{}", lines.join("\n"));
     }
@@ -924,6 +1074,6 @@ mod tests {
         app.help = true;
         let text = snapshot(&app, 72, 20).join("\n");
         assert!(text.contains("keys"), "{text}");
-        assert!(text.contains("views: runs / scalars"), "{text}");
+        assert!(text.contains("views: runs, scalars"), "{text}");
     }
 }

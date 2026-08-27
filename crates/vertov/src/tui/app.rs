@@ -96,6 +96,8 @@ pub struct RunRow {
     pub restarts: u64,
     pub step: Option<i64>,
     pub duration: Option<f64>,
+    /// A tiny trend of the run's preferred metric, when materialized.
+    pub spark: Option<String>,
 }
 
 pub struct RunsView {
@@ -223,6 +225,70 @@ impl App {
         }
     }
 
+    /// The run's headline metric: the first scalar tag mentioning "loss",
+    /// else its first scalar tag.
+    fn preferred_tag(run: &vertov_model::Run) -> Option<&String> {
+        let scalars = || {
+            run.series
+                .iter()
+                .filter(|(_, series)| series.class == SeriesClass::Scalar)
+                .map(|(tag, _)| tag)
+        };
+        scalars()
+            .find(|tag| tag.contains("loss"))
+            .or_else(|| scalars().next())
+    }
+
+    /// A 12-cell trend of the run's preferred metric from its materialized
+    /// points: each bucket shows its *maximum* (a spike must survive even a
+    /// one-cell chart), normalized to the visible range.
+    fn sparkline(&self, name: &str, run: &vertov_model::Run) -> Option<String> {
+        const CELLS: usize = 12;
+        const RAMP: [char; 8] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
+        let tag = Self::preferred_tag(run)?;
+        let points = self.project.points(name, tag)?;
+        let finite: Vec<f64> = points
+            .values
+            .iter()
+            .rev()
+            .take(120)
+            .copied()
+            .filter(|value| value.is_finite())
+            .collect();
+        if finite.len() < 2 {
+            return None;
+        }
+        let values: Vec<f64> = finite.into_iter().rev().collect();
+        let buckets: Vec<f64> = (0..CELLS)
+            .map(|cell| {
+                let from = cell * values.len() / CELLS;
+                let to = ((cell + 1) * values.len() / CELLS).max(from + 1);
+                values[from..to.min(values.len())]
+                    .iter()
+                    .copied()
+                    .fold(f64::NEG_INFINITY, f64::max)
+            })
+            .collect();
+        let (min, max) = buckets
+            .iter()
+            .fold((f64::INFINITY, f64::NEG_INFINITY), |(min, max), &value| {
+                (min.min(value), max.max(value))
+            });
+        Some(
+            buckets
+                .iter()
+                .map(|&value| {
+                    if max <= min {
+                        RAMP[3]
+                    } else {
+                        let level = ((value - min) / (max - min) * 7.0).round() as usize;
+                        RAMP[level.min(7)]
+                    }
+                })
+                .collect(),
+        )
+    }
+
     /// Whether the working set (keep/exclude refinement) admits a run.
     fn in_working_set(&self, name: &str) -> bool {
         self.working_set
@@ -259,6 +325,7 @@ impl App {
                     (Some(first), Some(last)) if last >= first => Some(last - first),
                     _ => None,
                 },
+                spark: self.sparkline(name, run),
             })
             .collect();
         rows.sort_by(|a, b| {
@@ -484,7 +551,23 @@ impl App {
                     self.project.materialize_histograms(&run, &tag)?;
                 }
             }
-            View::Runs | View::Hparams => {}
+            View::Runs => {
+                // Sparklines want the preferred metric of every visible
+                // run; the LRU bounds the cost.
+                let wanted: Vec<(String, String)> = self
+                    .run_rows()
+                    .into_iter()
+                    .take(40)
+                    .filter_map(|row| {
+                        let run = self.project.runs.get(&row.name)?;
+                        Some((row.name, Self::preferred_tag(run)?.clone()))
+                    })
+                    .collect();
+                for (run, tag) in wanted {
+                    self.project.materialize(&run, &tag)?;
+                }
+            }
+            View::Hparams => {}
         }
         Ok(())
     }
