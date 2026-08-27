@@ -138,12 +138,12 @@ fn draw_header(frame: &mut Frame, app: &App, area: Rect) {
 /// is watching, and a short menu — borderless and centered, so the first
 /// impression is calm rather than an empty table.
 fn draw_welcome(frame: &mut Frame, app: &App, area: Rect) {
-    const MARK: [&str; 5] = [
-        "•   •  •••••  ••••   •••••   •••   •   •",
-        "•   •  •      •   •    •    •   •  •   •",
-        "•   •  •••    ••••     •    •   •  •   •",
-        " • •   •      •  •     •    •   •   • • ",
-        "  •    •••••  •   •    •     •••     •  ",
+    // Rows share one width so per-line centering cannot shear the art.
+    const MARK: [&str; 4] = [
+        "             _           ",
+        " _ _ ___ ___| |_ ___ _ _ ",
+        "| | | -_|  _|  _| . | | |",
+        " \\_/|___|_| |_| |___|\\_/ ",
     ];
     const MENU: &[(&str, &str)] = &[
         ("refresh now", "r"),
