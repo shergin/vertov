@@ -6,7 +6,9 @@ use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Row, Table};
+use ratatui::widgets::{
+    Block, Borders, Clear, List, ListItem, ListState, Paragraph, Row, Table, TableState,
+};
 
 use crate::chart::{ChartData, DistData};
 use crate::table::fmt_duration;
@@ -154,7 +156,10 @@ fn draw_runs(frame: &mut Frame, app: &App, area: Rect) {
     )
     .header(header)
     .block(Block::default().borders(Borders::ALL).title(title));
-    frame.render_widget(table, area);
+    // Stateful render purely for scrolling: the state is rebuilt from the
+    // cursor every frame, so the table follows it below the fold.
+    let mut state = TableState::default().with_selected(cursor);
+    frame.render_stateful_widget(table, area, &mut state);
 }
 
 fn draw_scalars(frame: &mut Frame, app: &App, area: Rect) -> Vec<PixelPanel> {
@@ -175,9 +180,12 @@ fn draw_scalars(frame: &mut Frame, app: &App, area: Rect) -> Vec<PixelPanel> {
         })
         .collect();
     let title = panel_title("tags", &app.scalars.filter, app.scalars.editing_filter);
-    frame.render_widget(
+    let mut state = ListState::default()
+        .with_selected(tags.iter().position(|tag| Some(tag) == current.as_ref()));
+    frame.render_stateful_widget(
         List::new(items).block(Block::default().borders(Borders::ALL).title(title)),
         left,
+        &mut state,
     );
 
     match current {
@@ -329,11 +337,13 @@ fn draw_hparams(frame: &mut Frame, app: &App, area: Rect) {
         use std::fmt::Write as _;
         let _ = write!(title, " · keeping {} (U resets)", kept.len());
     }
-    frame.render_widget(
+    let mut state = TableState::default().with_selected(cursor);
+    frame.render_stateful_widget(
         Table::new(table_rows, constraints)
             .header(header)
             .block(Block::default().borders(Borders::ALL).title(title)),
         area,
+        &mut state,
     );
 }
 
@@ -361,9 +371,12 @@ fn draw_distributions(frame: &mut Frame, app: &App, area: Rect) -> Vec<PixelPane
         &app.distributions.filter,
         app.distributions.editing_filter,
     );
-    frame.render_widget(
+    let mut state = ListState::default()
+        .with_selected(tags.iter().position(|tag| Some(tag) == current_tag.as_ref()));
+    frame.render_stateful_widget(
         List::new(items).block(Block::default().borders(Borders::ALL).title(title)),
         left,
+        &mut state,
     );
 
     let built = target.as_ref().and_then(|(run, tag)| {
