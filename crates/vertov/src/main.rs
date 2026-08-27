@@ -296,6 +296,7 @@ fn status_text(run: &Run, now: std::time::SystemTime, window: Duration) -> &'sta
     match run.status(now, window) {
         RunStatus::Active => "active",
         RunStatus::Idle => "idle",
+        RunStatus::Finished => "done",
         RunStatus::Unknown => "?",
     }
 }

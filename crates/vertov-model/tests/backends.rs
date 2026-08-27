@@ -275,6 +275,82 @@ fn real_mlflow_fixture_parses() {
 }
 
 #[test]
+fn wandb_run_end_to_end() {
+    use vertov_formats::wandb::writer;
+    let logdir = Logdir::new("wandb");
+    let dir = logdir.path().join("offline-run-20260826_120000-abc123");
+    fs::create_dir_all(&dir).unwrap();
+    let wandb_path = dir.join("run-abc123.wandb");
+    let mut file = writer::wandb_file(&[
+        writer::config_record(&[("lr", "{\"value\": 0.001}"), ("optimizer", "\"adam\"")]),
+        writer::history_record(0, 1.7e9, &[("loss", "4.0"), ("acc", "0.5")]),
+        writer::history_record(1, 1.7e9 + 10.0, &[("loss", "NaN"), ("acc", "0.75")]),
+    ]);
+    fs::write(&wandb_path, &file).unwrap();
+
+    let mut project = Project::new(logdir.path());
+    let report = project.refresh().unwrap();
+    assert_eq!(report.new_points, 4);
+    let name = "offline-run-20260826_120000-abc123";
+    let run = &project.runs[name];
+    assert_eq!(run.backend, Backend::Wandb);
+    assert_eq!(run.hparams["lr"], vertov_model::HparamValue::F64(0.001));
+    assert_eq!(
+        run.hparams["optimizer"],
+        vertov_model::HparamValue::String("adam".into())
+    );
+    // No exit record yet: not finished; mtime says active.
+    assert_eq!(run.finished, None);
+    assert_eq!(run.series["loss"].summary.count(), 2);
+    assert_eq!(run.series["loss"].summary.segments[0].non_finite, 1);
+    assert_eq!(run.first_wall, Some(1.7e9));
+
+    let points = project.materialize(name, "loss").unwrap().unwrap();
+    assert_eq!(points.steps, vec![0, 1]);
+    assert_eq!(points.values[0], 4.0);
+    assert!(points.values[1].is_nan());
+
+    // The trainer logs one more row and exits cleanly.
+    writer::append_record(
+        &mut file,
+        &writer::history_record(2, 1.7e9 + 20.0, &[("loss", "2.0"), ("acc", "0.9")]),
+    );
+    writer::append_record(&mut file, &writer::exit_record());
+    fs::write(&wandb_path, &file).unwrap();
+    let report = project.refresh().unwrap();
+    assert_eq!(report.new_points, 2);
+    assert_eq!(project.points(name, "loss").unwrap().steps, vec![0, 1, 2]);
+    let run = &project.runs[name];
+    assert_eq!(run.finished, Some(true));
+    assert_eq!(
+        run.status(std::time::SystemTime::now(), std::time::Duration::from_secs(60)),
+        vertov_model::RunStatus::Finished
+    );
+}
+
+#[test]
+fn wandb_newer_version_is_a_dead_file() {
+    let logdir = Logdir::new("wandb-version");
+    let dir = logdir.path().join("offline-run-1-x");
+    fs::create_dir_all(&dir).unwrap();
+    let mut file = vertov_formats::wandb::writer::wandb_file(&[]);
+    file[6] = 9; // a future version byte
+    fs::write(dir.join("run-x.wandb"), &file).unwrap();
+
+    let mut project = Project::new(logdir.path());
+    let report = project.refresh().unwrap();
+    assert_eq!(report.dead_files, 1);
+    assert_eq!(project.dead_files, 1);
+    // The run exists (visible) but carries no data — fail loudly, keep
+    // other backends working.
+    assert!(project.runs["offline-run-1-x"].series.is_empty());
+    // A dead file is reported once, not every tick.
+    let report = project.refresh().unwrap();
+    assert_eq!(report.dead_files, 0);
+    assert_eq!(project.dead_files, 1);
+}
+
+#[test]
 fn vanished_dvclive_run_is_dropped() {
     let logdir = Logdir::new("dvclive-vanish");
     logdir.write("run/dvclive/plots/metrics/loss.tsv", "step\tloss\n0\t1.0\n");

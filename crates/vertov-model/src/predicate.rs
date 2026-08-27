@@ -401,6 +401,7 @@ mod tests {
             first_wall: None,
             last_wall: None,
             last_write: None,
+            finished: None,
             preemptions: 0,
         }
     }

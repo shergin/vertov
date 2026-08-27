@@ -271,6 +271,7 @@ pub(crate) fn load(root: &Path, dir: Option<&Path>) -> Option<CachedProject> {
                 first_wall,
                 last_wall,
                 last_write: None,
+                finished: None,
                 preemptions,
             },
         );

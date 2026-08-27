@@ -8,6 +8,7 @@
 
 pub mod dvclive;
 pub mod mlflow;
+pub mod wandb;
 
 /// A typed configuration value, as the simple formats can express one.
 #[derive(Clone, PartialEq, Debug)]

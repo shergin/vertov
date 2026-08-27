@@ -30,6 +30,9 @@ pub enum RunStatus {
     Active,
     /// Nothing changed within the window.
     Idle,
+    /// The backend recorded a clean exit (wandb's exit record) — stronger
+    /// provenance than modification recency.
+    Finished,
     /// No modification time is available.
     Unknown,
 }
@@ -46,6 +49,8 @@ pub enum Backend {
     Dvclive,
     /// The MLflow file store: `mlruns/<exp>/<run>/metrics/*`.
     Mlflow,
+    /// wandb offline: `offline-run-*/run-*.wandb` transaction logs.
+    Wandb,
 }
 
 impl Backend {
@@ -55,6 +60,7 @@ impl Backend {
             Backend::Tfevents => "tfevents",
             Backend::Dvclive => "dvclive",
             Backend::Mlflow => "mlflow",
+            Backend::Wandb => "wandb",
         }
     }
 }
@@ -77,6 +83,9 @@ pub struct Run {
     pub last_wall: Option<f64>,
     /// Latest file modification time, from the most recent refresh.
     pub last_write: Option<SystemTime>,
+    /// A backend-recorded clean exit (wandb); `None` when the backend has
+    /// no such signal — status then falls back to modification recency.
+    pub finished: Option<bool>,
     /// Total step preemptions observed across the run's series.
     pub preemptions: u64,
 }
@@ -91,6 +100,7 @@ impl Run {
             first_wall: None,
             last_wall: None,
             last_write: None,
+            finished: None,
             preemptions: 0,
         }
     }
@@ -125,9 +135,12 @@ impl Run {
         }
     }
 
-    /// Status by modification recency: `Active` if a file changed within
-    /// `window` of `now`.
+    /// Status: a backend-recorded clean exit wins; otherwise modification
+    /// recency — `Active` if a file changed within `window` of `now`.
     pub fn status(&self, now: SystemTime, window: Duration) -> RunStatus {
+        if self.finished == Some(true) {
+            return RunStatus::Finished;
+        }
         match self.last_write {
             Some(last) => match now.duration_since(last) {
                 Ok(elapsed) if elapsed > window => RunStatus::Idle,
@@ -177,6 +190,15 @@ struct MlflowState {
     params_seen: std::collections::BTreeSet<PathBuf>,
 }
 
+/// Resume state for one wandb offline run: the committed byte offset into
+/// its `.wandb` log (0 until the header is validated) and whether the file
+/// was rejected (bad header or newer version — dead, prefix retained).
+struct WandbState {
+    run: String,
+    offset: u64,
+    dead: bool,
+}
+
 struct MaterializedSeries {
     points: Points,
     touched: u64,
@@ -211,6 +233,8 @@ pub struct Project {
     dvclive: BTreeMap<PathBuf, DvcliveState>,
     /// MLflow run directories by path.
     mlflow: BTreeMap<PathBuf, MlflowState>,
+    /// wandb `.wandb` log files by path.
+    wandb: BTreeMap<PathBuf, WandbState>,
     /// run name → tag → points, so the per-point hot path looks up with
     /// borrowed keys.
     materialized: BTreeMap<String, BTreeMap<String, MaterializedSeries>>,
@@ -236,6 +260,7 @@ impl Project {
             files: BTreeMap::new(),
             dvclive: BTreeMap::new(),
             mlflow: BTreeMap::new(),
+            wandb: BTreeMap::new(),
             materialized: BTreeMap::new(),
             histograms: BTreeMap::new(),
             clock: 0,
@@ -310,6 +335,7 @@ impl Project {
             tfevents: discovered_tfevents,
             dvclive: discovered_dvclive,
             mlflow: discovered_mlflow,
+            wandb: discovered_wandb,
         } = discover(&self.root)?;
 
         // Cache validation pre-pass: a cached file that vanished, shrank,
@@ -394,12 +420,10 @@ impl Project {
                         ReadEventError::Corrupt { .. } | ReadEventError::Malformed { .. },
                     ) => {
                         report.dropped_records += 1;
-                        self.dropped_records += 1;
                     }
                     Err(ReadEventError::BadLengthCrc { .. } | ReadEventError::Io(_)) => {
                         state.dead = true;
                         report.dead_files += 1;
-                        self.dead_files += 1;
                         break;
                     }
                 }
@@ -514,6 +538,49 @@ impl Project {
             drain_mlflow(&path, state, run, &run_name, &mut self.materialized, &mut report)?;
         }
 
+        let wanted_wandb: BTreeMap<PathBuf, String> = discovered_wandb.into_iter()
+            .map(|(run, path)| (path, run))
+            .collect();
+        let gone: Vec<PathBuf> = self
+            .wandb
+            .keys()
+            .filter(|path| !wanted_wandb.contains_key(*path))
+            .cloned()
+            .collect();
+        for path in gone {
+            if let Some(state) = self.wandb.remove(&path) {
+                self.runs.remove(&state.run);
+                self.materialized.remove(&state.run);
+            }
+        }
+        for (path, base_name) in wanted_wandb {
+            if !self.wandb.contains_key(&path) {
+                let name = unique_run_name(&self.runs, base_name);
+                self.runs.entry(name.clone()).or_insert_with(|| {
+                    Run::new(
+                        Backend::Wandb,
+                        path.parent().unwrap_or(&self.root).to_path_buf(),
+                    )
+                });
+                self.wandb.insert(
+                    path.clone(),
+                    WandbState {
+                        run: name,
+                        offset: 0,
+                        dead: false,
+                    },
+                );
+                report.new_files += 1;
+            }
+            let state = self.wandb.get_mut(&path).expect("just ensured");
+            let run_name = state.run.clone();
+            let run = self.runs.get_mut(&run_name).expect("state has a run");
+            drain_wandb(&path, state, run, &run_name, &mut self.materialized, &mut report)?;
+        }
+
+        // Cumulative loss accounting, from whichever backend suffered it.
+        self.dropped_records += report.dropped_records;
+        self.dead_files += report.dead_files;
         Ok(report)
     }
 
@@ -571,6 +638,16 @@ impl Project {
                 let path = root.join("metrics").join(tag);
                 let frontier = state.offsets.get(&path).copied().unwrap_or(0);
                 materialize_metric_lines(&path, frontier)?
+            }
+            Backend::Wandb => {
+                let Some((path, state)) = self
+                    .wandb
+                    .iter()
+                    .find(|(_, state)| state.run == run_name)
+                else {
+                    return Ok(None);
+                };
+                materialize_wandb(path, state.offset, tag)?
             }
         };
 
@@ -1197,6 +1274,128 @@ fn drain_mlflow(
     Ok(())
 }
 
+/// One wandb tick: validate the header once, then parse the new bytes past
+/// the committed offset into records — history rows become scalar points,
+/// config updates become hparams, the exit record marks a clean finish.
+fn drain_wandb(
+    path: &Path,
+    state: &mut WandbState,
+    run: &mut Run,
+    run_name: &str,
+    materialized: &mut BTreeMap<String, BTreeMap<String, MaterializedSeries>>,
+    report: &mut RefreshReport,
+) -> io::Result<()> {
+    use vertov_formats::wandb;
+    if state.dead {
+        return Ok(());
+    }
+    let metadata = match std::fs::metadata(path) {
+        Ok(metadata) => metadata,
+        Err(err) if err.kind() == ErrorKind::NotFound => return Ok(()),
+        Err(err) => return Err(err),
+    };
+    if let Ok(mtime) = metadata.modified() {
+        run.last_write = Some(run.last_write.map_or(mtime, |known| known.max(mtime)));
+    }
+    if metadata.len() < state.offset {
+        // Rewritten shorter: honest recovery is a full re-read.
+        reset_run(run, run_name, materialized);
+        state.offset = 0;
+    }
+    if state.offset == 0 {
+        if metadata.len() < wandb::HEADER_LEN {
+            return Ok(());
+        }
+        let mut header = [0u8; wandb::HEADER_LEN as usize];
+        {
+            use std::io::Read as _;
+            let mut file = File::open(path)?;
+            file.read_exact(&mut header)?;
+        }
+        if wandb::check_header(&header).is_err() {
+            state.dead = true;
+            report.dead_files += 1;
+            return Ok(());
+        }
+        state.offset = wandb::HEADER_LEN;
+    }
+    if metadata.len() <= state.offset {
+        return Ok(());
+    }
+
+    let tail = {
+        use std::io::{Read as _, Seek as _, SeekFrom};
+        let mut file = File::open(path)?;
+        file.seek(SeekFrom::Start(state.offset))?;
+        let mut buf = Vec::with_capacity((metadata.len() - state.offset) as usize);
+        file.take(metadata.len() - state.offset).read_to_end(&mut buf)?;
+        buf
+    };
+    let (payloads, committed) = wandb::read_records(&tail, state.offset);
+    for payload in payloads {
+        match wandb::parse_record(&payload) {
+            Some(wandb::WandbRecord::History { step, wall, values }) => {
+                for (key, value) in values {
+                    observe_scalar(
+                        run,
+                        materialized,
+                        run_name,
+                        &key,
+                        PointStamp { step, wall, value },
+                        report,
+                    );
+                }
+            }
+            Some(wandb::WandbRecord::Config(updates)) => {
+                for (key, value) in updates {
+                    run.hparams.insert(key, convert_param(value));
+                }
+            }
+            Some(wandb::WandbRecord::Exit) => run.finished = Some(true),
+            Some(wandb::WandbRecord::Other) => {}
+            None => report.dropped_records += 1,
+        }
+    }
+    state.offset = committed;
+    Ok(())
+}
+
+/// Materializes one wandb series up to `frontier`.
+fn materialize_wandb(path: &Path, frontier: u64, tag: &str) -> io::Result<Points> {
+    use vertov_formats::wandb;
+    let mut points = Points::default();
+    if frontier <= wandb::HEADER_LEN {
+        return Ok(points);
+    }
+    let bytes = {
+        use std::io::Read as _;
+        let file = match File::open(path) {
+            Ok(file) => file,
+            Err(err) if err.kind() == ErrorKind::NotFound => return Ok(points),
+            Err(err) => return Err(err),
+        };
+        let mut buf = Vec::with_capacity(frontier as usize);
+        file.take(frontier).read_to_end(&mut buf)?;
+        buf
+    };
+    if bytes.len() < wandb::HEADER_LEN as usize {
+        return Ok(points);
+    }
+    let (payloads, _) = wandb::read_records(&bytes[wandb::HEADER_LEN as usize..], wandb::HEADER_LEN);
+    for payload in payloads {
+        if let Some(wandb::WandbRecord::History { step, wall, values }) =
+            wandb::parse_record(&payload)
+        {
+            for (key, value) in values {
+                if key == tag {
+                    points.push(PointStamp { step, wall, value });
+                }
+            }
+        }
+    }
+    Ok(points)
+}
+
 fn classify(value: &SummaryValue) -> SeriesClass {
     if let Some(metadata) = &value.metadata {
         match metadata.plugin_name.as_str() {
@@ -1240,6 +1439,9 @@ struct Discovery {
     /// carries a run id; named by its recorded `run_name`, falling back to
     /// the root-relative path.
     mlflow: Vec<(String, PathBuf)>,
+    /// wandb: `(run name, .wandb file)` — a `run-*.wandb` transaction log,
+    /// named by its directory's root-relative path.
+    wandb: Vec<(String, PathBuf)>,
 }
 
 /// Walks `root` once, classifying what it finds. Mixed roots just work:
@@ -1278,6 +1480,8 @@ fn discover(root: &Path) -> io::Result<Discovery> {
                 }
             } else if name.contains("tfevents") {
                 found.tfevents.push((run_name(root, &dir), path));
+            } else if name.starts_with("run-") && name.ends_with(".wandb") {
+                found.wandb.push((run_name(root, &dir), path));
             } else if name == "meta.yaml"
                 && let Ok(text) = std::fs::read_to_string(&path)
             {
@@ -1292,6 +1496,7 @@ fn discover(root: &Path) -> io::Result<Discovery> {
     found.tfevents.sort();
     found.dvclive.sort();
     found.mlflow.sort();
+    found.wandb.sort();
     Ok(found)
 }
 
