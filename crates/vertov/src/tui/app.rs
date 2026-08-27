@@ -105,6 +105,10 @@ pub struct App {
     /// Transient one-line notice (export path, errors), cleared on keypress.
     pub message: Option<String>,
     pub force_refresh: bool,
+    /// Pixel graphics for chart panels, when the terminal offered a
+    /// protocol (probed once, before raw mode). `None` means cell glyphs —
+    /// the honest fallback rung, not an error.
+    pub graphics: Option<malevich::pixel::Graphics>,
 }
 
 impl App {
@@ -134,6 +138,7 @@ impl App {
             last_change: Instant::now(),
             message: None,
             force_refresh: false,
+            graphics: None,
         }
     }
 

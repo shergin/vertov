@@ -21,6 +21,12 @@ pub fn run(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
     }
     project.refresh()?;
     let mut app = App::new(project, args.interval, &args.tag);
+    if !args.no_pixels {
+        // Probe before raw mode (§5.6): the capability query reads terminal
+        // replies, which a raw-mode event loop would swallow as input. The
+        // result is cached for the process.
+        app.graphics = malevich::pixel::Capabilities::detect_for(&std::io::stdout()).best();
+    }
 
     let mut terminal = ratatui::init();
     let result = event_loop(&mut terminal, &mut app);
@@ -41,27 +47,94 @@ fn event_loop(
     app: &mut App,
 ) -> std::io::Result<()> {
     let mut last_refresh = Instant::now();
+    // Repaint the image on data or state change, not on a timer (§5.6):
+    // when nothing changed, the previous transmission stays on screen.
+    let mut emit_needed = true;
+    let mut image_on_screen = false;
     loop {
         app.ensure_materialized()?;
-        terminal.draw(|frame| view::draw(frame, app))?;
+        let mut panel = None;
+        terminal.draw(|frame| panel = view::draw(frame, app))?;
 
-        if event::poll(Duration::from_millis(200))?
-            && let Event::Key(key) = event::read()?
-            && key.kind != KeyEventKind::Release
-            && app.update(key) == Action::Quit
-        {
-            return Ok(());
+        match &panel {
+            Some(panel) => {
+                if let Some(graphics) = &app.graphics
+                    && emit_needed
+                {
+                    emit_pixels(panel, graphics)?;
+                    emit_needed = false;
+                    image_on_screen = true;
+                }
+            }
+            None => {
+                // Left the chart (view switch, help overlay): cell content
+                // repaints the area, but kitty images live on their own
+                // layer and need an explicit goodbye.
+                if image_on_screen {
+                    delete_kitty_images(app)?;
+                    image_on_screen = false;
+                    emit_needed = true;
+                }
+            }
+        }
+
+        if event::poll(Duration::from_millis(200))? {
+            match event::read()? {
+                Event::Key(key) if key.kind != KeyEventKind::Release => {
+                    if app.update(key) == Action::Quit {
+                        return Ok(());
+                    }
+                    emit_needed = true;
+                }
+                Event::Resize(_, _) => emit_needed = true,
+                _ => {}
+            }
         }
 
         if app.force_refresh || (!app.paused && last_refresh.elapsed() >= app.interval) {
             let report = app.project.refresh()?;
             if report.new_points > 0 || report.new_files > 0 {
                 app.last_change = Instant::now();
+                emit_needed = true;
             }
             last_refresh = Instant::now();
             app.force_refresh = false;
         }
     }
+}
+
+/// Prints the chart panel as a real image: cursor to the panel's top row,
+/// then malevich's absolute-column block — chrome as text, plot rectangle
+/// as pixels (§5.6: emit after the frame).
+fn emit_pixels(panel: &view::PixelPanel, graphics: &malevich::pixel::Graphics) -> std::io::Result<()> {
+    use crossterm::{cursor::MoveTo, style::Print};
+    use std::io::Write as _;
+    let frame = malevich::Frame {
+        width: panel.area.width as usize,
+        height: panel.area.height as usize,
+        charset: malevich::Charset::Quadrants,
+        color: malevich::ColorMode::TrueColor,
+        theme: malevich::Theme::DARK,
+    };
+    let block = panel
+        .data
+        .plot(&panel.title)
+        .render_pixels_at(&frame, graphics, panel.area.x as usize);
+    let mut out = std::io::stdout();
+    crossterm::queue!(out, MoveTo(panel.area.x, panel.area.y), Print(block))?;
+    out.flush()
+}
+
+/// Deletes all visible kitty-protocol image placements. Other protocols
+/// paint into cells, which ordinary redraws already replace.
+fn delete_kitty_images(app: &App) -> std::io::Result<()> {
+    use std::io::Write as _;
+    if app.graphics.map(|graphics| graphics.protocol) == Some(malevich::pixel::Protocol::Kitty) {
+        let mut out = std::io::stdout();
+        out.write_all(b"\x1b_Ga=d,d=A\x1b\\")?;
+        out.flush()?;
+    }
+    Ok(())
 }
 
 /// A plain-text rendering of the current view for scrollback: the runs

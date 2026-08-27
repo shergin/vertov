@@ -11,7 +11,7 @@ categories = ["command-line-utilities", "visualization"]
 
 [dependencies]
 vertov-model = { path = "../vertov-model", version = "0.1" }
-malevich = { version = "1.18", features = ["ratatui"] }
+malevich = { version = "1.18", features = ["ratatui", "pixel"] }
 ratatui = "0.30"
 crossterm = "0.29"
 # lexopt over clap, kaz's precedent: ~0 extra deps, no proc-macro tree, and

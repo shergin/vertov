@@ -62,6 +62,9 @@ Options:
       --no-cache        Skip the summary cache (~/.cache/vertov/); always
                         re-read from the logdir. The cache is disposable —
                         deleting it by hand is always safe too.
+      --pixels <MODE>   auto (default): TUI charts render as real images
+                        where the terminal speaks sixel/kitty/iTerm2, cell
+                        glyphs elsewhere. never: always cell glyphs.
   -h, --help            This help.
 
 Examples:
@@ -82,6 +85,7 @@ struct Args {
     width: Option<usize>,
     height: Option<usize>,
     no_cache: bool,
+    no_pixels: bool,
 }
 
 enum Command {
@@ -137,6 +141,7 @@ fn parse_args() -> Result<Option<Args>, lexopt::Error> {
     let mut width = None;
     let mut height = None;
     let mut no_cache = false;
+    let mut no_pixels = false;
 
     let mut parser = lexopt::Parser::from_env();
     while let Some(arg) = parser.next()? {
@@ -178,6 +183,15 @@ fn parse_args() -> Result<Option<Args>, lexopt::Error> {
             Long("width") => width = Some(parser.value()?.parse()?),
             Long("height") => height = Some(parser.value()?.parse()?),
             Long("no-cache") => no_cache = true,
+            Long("pixels") => {
+                no_pixels = match parser.value()?.string()?.as_str() {
+                    "auto" => false,
+                    "never" => true,
+                    other => {
+                        return Err(format!("unknown pixels mode `{other}` (auto|never)").into());
+                    }
+                };
+            }
             Short('h') | Long("help") => return Ok(None),
             _ => return Err(arg.unexpected()),
         }
@@ -228,6 +242,7 @@ fn parse_args() -> Result<Option<Args>, lexopt::Error> {
         width,
         height,
         no_cache,
+        no_pixels,
     }))
 }
 

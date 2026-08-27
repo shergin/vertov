@@ -12,17 +12,30 @@ use crate::chart::ChartData;
 use crate::table::fmt_duration;
 use crate::tui::app::{App, View};
 
-pub fn draw(frame: &mut Frame, app: &App) {
+/// A chart panel reserved for pixel graphics this frame: the cell diff left
+/// its rect untouched (skip cells), and the caller emits this after the
+/// frame flushes.
+pub struct PixelPanel {
+    pub area: Rect,
+    pub data: ChartData,
+    pub title: String,
+}
+
+pub fn draw(frame: &mut Frame, app: &App) -> Option<PixelPanel> {
     let [body, status] =
         Layout::vertical([Constraint::Fill(1), Constraint::Length(1)]).areas(frame.area());
-    match app.view {
-        View::Runs => draw_runs(frame, app, body),
+    let panel = match app.view {
+        View::Runs => {
+            draw_runs(frame, app, body);
+            None
+        }
         View::Scalars => draw_scalars(frame, app, body),
-    }
+    };
     draw_status(frame, app, status);
     if app.help {
         draw_help(frame, frame.area());
     }
+    panel
 }
 
 fn draw_runs(frame: &mut Frame, app: &App, area: Rect) {
@@ -95,7 +108,7 @@ fn draw_runs(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(table, area);
 }
 
-fn draw_scalars(frame: &mut Frame, app: &App, area: Rect) {
+fn draw_scalars(frame: &mut Frame, app: &App, area: Rect) -> Option<PixelPanel> {
     let [left, right] =
         Layout::horizontal([Constraint::Length(28), Constraint::Fill(1)]).areas(area);
 
@@ -123,6 +136,17 @@ fn draw_scalars(frame: &mut Frame, app: &App, area: Rect) {
             let scope = app.scoped_runs();
             let data = ChartData::for_tag(&app.project, &scope, &tag, &app.chart_options());
             let title = chart_title(app, &tag, &data);
+            // Pixel path: reserve the rect with skip cells and hand the
+            // panel back for post-frame emission — unless the help overlay
+            // needs to paint over this area with ordinary cells.
+            if app.graphics.is_some() && !app.help {
+                reserve(right, frame.buffer_mut());
+                return Some(PixelPanel {
+                    area: right,
+                    data,
+                    title,
+                });
+            }
             frame.render_widget(data.plot(&title).widget(), right);
         }
         None => {
@@ -131,6 +155,20 @@ fn draw_scalars(frame: &mut Frame, app: &App, area: Rect) {
                     .block(Block::default().borders(Borders::ALL)),
                 right,
             );
+        }
+    }
+    None
+}
+
+/// Fills `area` with skip-flagged cells so the frame diff never paints over
+/// the image region (§5.6: reserve, don't render).
+fn reserve(area: Rect, buffer: &mut ratatui::buffer::Buffer) {
+    for y in area.top()..area.bottom() {
+        for x in area.left()..area.right() {
+            if let Some(cell) = buffer.cell_mut((x, y)) {
+                cell.set_symbol(" ");
+                cell.set_diff_option(ratatui::buffer::CellDiffOption::Skip);
+            }
         }
     }
 }
@@ -303,7 +341,11 @@ mod tests {
     /// contains the temp path) excluded.
     fn snapshot(app: &App, width: u16, height: u16) -> Vec<String> {
         let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
-        terminal.draw(|frame| draw(frame, app)).unwrap();
+        terminal
+            .draw(|frame| {
+                draw(frame, app);
+            })
+            .unwrap();
         let buffer = terminal.backend().buffer();
         (0..height.saturating_sub(1))
             .map(|y| {
@@ -373,6 +415,53 @@ mod tests {
         assert_eq!(app.runs.cursor.as_deref(), Some("sgd"));
         assert!(app.runs.selected.contains("adam"));
         assert_eq!(app.visible_tags(), vec!["train/loss".to_owned()]);
+    }
+
+    #[test]
+    fn pixel_mode_reserves_the_panel_and_block_carries_the_image() {
+        use malevich::pixel::{Graphics, Protocol};
+        let (mut app, _guard) = test_app("pixel-reserve");
+        app.view = View::Scalars;
+        app.scalars.cursor = Some("train/loss".to_owned());
+        app.graphics = Some(Graphics::new(Protocol::Kitty));
+        app.ensure_materialized().unwrap();
+
+        let mut terminal = Terminal::new(TestBackend::new(72, 14)).unwrap();
+        let mut panel = None;
+        terminal.draw(|frame| panel = draw(frame, &app)).unwrap();
+        let panel = panel.expect("pixel panel returned");
+        assert_eq!(panel.area.x, 28);
+
+        // Reserve, don't render: the chart rect stays blank in the cell
+        // buffer — the image is emitted after the frame, not through it.
+        let buffer = terminal.backend().buffer();
+        for y in panel.area.top()..panel.area.bottom() {
+            for x in panel.area.left()..panel.area.right() {
+                assert_eq!(buffer.cell((x, y)).unwrap().symbol(), " ", "at {x},{y}");
+            }
+        }
+
+        // The post-frame block really is a kitty graphics transmission.
+        let frame = malevich::Frame {
+            width: panel.area.width as usize,
+            height: panel.area.height as usize,
+            charset: malevich::Charset::Quadrants,
+            color: malevich::ColorMode::TrueColor,
+            theme: malevich::Theme::DARK,
+        };
+        let block = panel.data.plot(&panel.title).render_pixels_at(
+            &frame,
+            &Graphics::new(Protocol::Kitty),
+            panel.area.x as usize,
+        );
+        assert!(block.contains("\x1b_G"), "kitty APC missing");
+        assert!(block.contains(&panel.title), "chrome title missing");
+
+        // Help overlay wins over the image: no panel while it is open.
+        app.help = true;
+        let mut panel = None;
+        terminal.draw(|frame| panel = draw(frame, &app)).unwrap();
+        assert!(panel.is_none());
     }
 
     #[test]

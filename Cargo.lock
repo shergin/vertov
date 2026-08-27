@@ -798,6 +798,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ad6500214e6ff071d0f39477c2264a8fe69516cfd2bd04254af6b1d74f487473"
 dependencies = [
  "ratatui-core",
+ "rustix",
  "terminal_size",
  "unicode-width",
 ]
