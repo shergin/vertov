@@ -57,6 +57,17 @@ impl SummaryValue {
             _ => None,
         }
     }
+
+    /// The histogram carried by this value as normalized
+    /// `(left, right, count)` buckets — TF2's native form, which the TF1
+    /// message converts into. `None` when the value is not a histogram.
+    pub fn histogram_buckets(&self) -> Option<Vec<(f64, f64, f64)>> {
+        match &self.payload {
+            SummaryPayload::Histogram(histogram) => Some(histogram.buckets()),
+            SummaryPayload::Tensor(tensor) => tensor.histogram_buckets(),
+            _ => None,
+        }
+    }
 }
 
 /// The value oneof of a `Summary.Value`.
@@ -175,6 +186,24 @@ impl Tensor {
     pub fn strings(&self) -> Option<&[Vec<u8>]> {
         (self.dtype == DataType::String).then_some(&self.string_val[..])
     }
+
+    /// The `(left, right, count)` bucket rows of a TF2 histogram tensor
+    /// (shape `[k, 3]`, `DT_DOUBLE`), or `None` when the tensor is not one.
+    pub fn histogram_buckets(&self) -> Option<Vec<(f64, f64, f64)>> {
+        if self.shape.len() != 2 || self.shape[1] != 3 {
+            return None;
+        }
+        let values = self.doubles()?;
+        if values.len() % 3 != 0 {
+            return None;
+        }
+        Some(
+            values
+                .chunks_exact(3)
+                .map(|row| (row[0], row[1], row[2]))
+                .collect(),
+        )
+    }
 }
 
 /// `tensorflow::DataType`, reduced to the cases summaries use.
@@ -223,6 +252,40 @@ pub struct Image {
     pub colorspace: i32,
     /// The encoded image bytes (PNG unless the writer chose otherwise).
     pub encoded_image: Vec<u8>,
+}
+
+impl Histogram {
+    /// Converts to TF2's normalized `(left, right, count)` bucket rows:
+    /// each bucket's left edge is the previous `bucket_limit`, and the
+    /// outermost edges are replaced by the observed `min`/`max` (RustBoard's
+    /// conversion — the sentinel edges TF1 writers use are not data). The
+    /// replacements are clamped so edges stay monotone: real writers
+    /// (tensorboardX's geometric bin ladder) emit limits outside
+    /// `[min, max]`, which would otherwise invert the outer buckets.
+    pub fn buckets(&self) -> Vec<(f64, f64, f64)> {
+        let count = self.bucket.len().min(self.bucket_limit.len());
+        (0..count)
+            .map(|index| {
+                let mut left = if index == 0 {
+                    self.min
+                } else {
+                    self.bucket_limit[index - 1]
+                };
+                let mut right = if index + 1 == count {
+                    self.max
+                } else {
+                    self.bucket_limit[index]
+                };
+                if index == 0 {
+                    left = left.min(right);
+                }
+                if index + 1 == count {
+                    right = right.max(left);
+                }
+                (left, right, self.bucket[index])
+            })
+            .collect()
+    }
 }
 
 /// The TF1 `HistogramProto` message.
@@ -646,6 +709,10 @@ mod tests {
         assert_eq!(tensor.shape, vec![2, 3]);
         assert_eq!(tensor.doubles().unwrap(), rows);
         assert_eq!(values[0].scalar(), None);
+        assert_eq!(
+            values[0].histogram_buckets(),
+            Some(vec![(0.0, 1.0, 5.0), (1.0, 2.0, 7.0)])
+        );
     }
 
     #[test]
@@ -683,6 +750,12 @@ mod tests {
         assert_eq!((h.min, h.max, h.num), (-1.0, 3.0, 10.0));
         assert_eq!(h.bucket_limit, vec![0.0, 1.0, 2.0]);
         assert_eq!(h.bucket, vec![3.0, 4.0, 3.0]);
+        // Normalized rows: outer edges replaced by observed min/max.
+        assert_eq!(
+            h.buckets(),
+            vec![(-1.0, 0.0, 3.0), (0.0, 1.0, 4.0), (1.0, 3.0, 3.0)]
+        );
+        assert_eq!(values[0].histogram_buckets(), Some(h.buckets()));
     }
 
     #[test]

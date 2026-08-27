@@ -76,6 +76,14 @@ fn tensorboardx_fixture_parses_fully() {
                     assert!(histogram.num > 0.0);
                     assert!(!histogram.bucket.is_empty());
                     assert_eq!(histogram.bucket_limit.len(), histogram.bucket.len());
+                    // Normalized buckets: contiguous, all counts accounted.
+                    let buckets = histogram.buckets();
+                    for pair in buckets.windows(2) {
+                        assert_eq!(pair[0].1, pair[1].0, "buckets must be contiguous");
+                        assert!(pair[0].0 <= pair[0].1);
+                    }
+                    let total: f64 = buckets.iter().map(|(_, _, count)| count).sum();
+                    assert_eq!(total, histogram.num);
                     histogram_steps.push(event.step);
                 }
                 ("notes/text_summary", SummaryPayload::Tensor(tensor)) => {
